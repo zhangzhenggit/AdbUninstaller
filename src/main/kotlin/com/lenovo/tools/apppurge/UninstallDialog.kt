@@ -20,7 +20,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.16"
+private const val PLUGIN_VERSION = "1.2.17"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -162,9 +162,16 @@ class UninstallDialog(
         val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply {
             add(summaryLabel); add(uninstallBtn)
         }
-        val statusPanel = JPanel(FlowLayout(FlowLayout.CENTER, 6, 0)).apply {
-            add(statusLabel)
-            add(cancelNameResolveBtn)
+        val statusPanel = JPanel(GridBagLayout()).apply {
+            add(statusLabel, GridBagConstraints().apply {
+                gridx = 0
+                insets = Insets(0, 0, 0, 6)
+                anchor = GridBagConstraints.CENTER
+            })
+            add(cancelNameResolveBtn, GridBagConstraints().apply {
+                gridx = 1
+                anchor = GridBagConstraints.CENTER
+            })
         }
         val bottomPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.empty(14, 10, 10, 10)
@@ -264,8 +271,6 @@ class UninstallDialog(
                 }
 
                 val projectInstalledCnt = projectAppInfos.count { it.status == InstallStatus.INSTALLED }
-                val projectStatusMsg = "$projectInstalledCnt / ${projectAppInfos.size} installed"
-
                 if (showAll) {
                     val projectPkgs = projectAppInfos.map { it.packageName }.toSet()
                     val userPkgs = (installedPkgs - systemPkgs - projectPkgs).sorted()
@@ -305,7 +310,7 @@ class UninstallDialog(
                         tableModel.resetItems(projectAppInfos)
                         updateRowHeights()
                         setLoading(false)
-                        setStatus(projectStatusMsg)
+                        setStatus("")
                     }
                 }
             } catch (e: Exception) {
