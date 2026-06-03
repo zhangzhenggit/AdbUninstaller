@@ -19,14 +19,14 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.6"
+private const val PLUGIN_VERSION = "1.2.7"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
 private const val ACTION_BUTTON_SIZE = 32
 private const val ACTION_BUTTON_GAP = 8
-private const val DATA_ROW_HEIGHT = 58
-private const val SECTION_ROW_HEIGHT = 30
+private const val DATA_ROW_HEIGHT = 54
+private const val SECTION_ROW_HEIGHT = 28
 
 class UninstallDialog(
     project: Project,
@@ -51,7 +51,6 @@ class UninstallDialog(
     private val uninstallingPackages = mutableSetOf<String>()
     private val uninstallBtn = JButton("Uninstall Selected").apply {
         foreground = Color(0xD3, 0x56, 0x5C)
-        isContentAreaFilled = false
     }
 
     init {
@@ -64,19 +63,6 @@ class UninstallDialog(
         tableModel = UninstallTableModel()
         tableModel.addTableModelListener { updateSummary() }
         table = object : JBTable(tableModel) {
-            // Single full-width line for Divider rows
-            override fun paintComponent(g: Graphics) {
-                super.paintComponent(g)
-                g.color = UIManager.getColor("Separator.foreground") ?: Color.LIGHT_GRAY
-                tableModel.rows.forEachIndexed { i, row ->
-                    val rect = getCellRect(i, 0, true)
-                    when (row) {
-                        is TableRow.Divider -> g.drawLine(0, rect.y + rect.height / 2, width, rect.y + rect.height / 2)
-                        else -> Unit
-                    }
-                }
-            }
-
             override fun getToolTipText(e: MouseEvent): String? {
                 val row = rowAtPoint(e.point)
                 val col = columnAtPoint(e.point)
@@ -88,30 +74,17 @@ class UninstallDialog(
                 }
             }
         }.apply {
-            setShowGrid(false)
             rowSelectionAllowed = false
             columnSelectionAllowed = false
             cellSelectionEnabled = false
-            intercellSpacing = Dimension(0, 0)
+            intercellSpacing = Dimension(1, 1)
             rowHeight = DATA_ROW_HEIGHT
-            fillsViewportHeight = true
             columnModel.getColumn(UninstallTableModel.COL_CHECK).apply { maxWidth = 54; minWidth = 54 }
             columnModel.getColumn(UninstallTableModel.COL_APP).preferredWidth = 400
             columnModel.getColumn(UninstallTableModel.COL_STATUS).preferredWidth = 300
             columnModel.getColumn(UninstallTableModel.COL_ACTION).apply { maxWidth = 192; minWidth = 192 }
             val renderer = UniversalRenderer()
             for (i in 0 until columnCount) columnModel.getColumn(i).cellRenderer = renderer
-            tableHeader.defaultRenderer = HeaderRenderer(tableHeader.defaultRenderer)
-            tableHeader.preferredSize = Dimension(tableHeader.preferredSize.width, 38)
-            tableHeader.addMouseListener(object : MouseAdapter() {
-                override fun mouseClicked(e: MouseEvent) {
-                    if (columnAtPoint(e.point) == UninstallTableModel.COL_CHECK) {
-                        tableModel.toggleSelectAllVisible()
-                        updateSummary()
-                        repaint()
-                    }
-                }
-            })
 
             addMouseListener(object : MouseAdapter() {
                 override fun mousePressed(e: MouseEvent) {
@@ -165,18 +138,14 @@ class UninstallDialog(
 
         val tableScroll = JBScrollPane(table).apply {
             preferredSize = Dimension(1040, 480)
-            border = JBUI.Borders.empty()
-            viewport.background = table.background
         }
 
         val selectAllBtn = JButton("Select All").apply {
             preferredSize = Dimension(100, 32)
-            isContentAreaFilled = false
             addActionListener { tableModel.setSelectAll(true); updateSummary() }
         }
         val deselectAllBtn = JButton("Deselect All").apply {
             preferredSize = Dimension(116, 32)
-            isContentAreaFilled = false
             addActionListener { tableModel.setSelectAll(false); updateSummary() }
         }
         uninstallBtn.addActionListener { onBatchUninstall() }
@@ -531,38 +500,15 @@ class UninstallDialog(
 
     // ── Renderer ──────────────────────────────────────────────────────────────
 
-    private inner class HeaderRenderer(private val delegate: TableCellRenderer) : TableCellRenderer {
-        override fun getTableCellRendererComponent(
-            table: JTable,
-            value: Any?,
-            isSelected: Boolean,
-            hasFocus: Boolean,
-            row: Int,
-            column: Int,
-        ): Component {
-            val c = delegate.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
-            val label = (c as? JLabel) ?: return c
-            label.border = JBUI.Borders.empty(0, 16)
-            label.font = label.font.deriveFont(Font.BOLD, 13f)
-            label.background = table.background
-            label.isOpaque = true
-            if (column == UninstallTableModel.COL_CHECK) {
-                label.horizontalAlignment = SwingConstants.CENTER
-                label.text = when {
-                    tableModel.allVisibleSelected -> "✓"
-                    tableModel.selectedCount > 0 -> "−"
-                    else -> ""
-                }
-            } else {
-                label.horizontalAlignment = SwingConstants.LEFT
-            }
-            return label
-        }
-    }
-
     private inner class UniversalRenderer : TableCellRenderer {
         private val textRenderer = DefaultTableCellRenderer()
-        private val checkbox = JCheckBox().apply { isOpaque = true; horizontalAlignment = SwingConstants.CENTER }
+        private val checkbox = JCheckBox().apply {
+            isOpaque = true
+            horizontalAlignment = SwingConstants.CENTER
+            isFocusable = false
+            isRequestFocusEnabled = false
+            model.isRollover = false
+        }
         private val actionPanel = JPanel(GridBagLayout()).apply { isOpaque = true }
         private val actionButtons = RowAction.entries.map { action ->
             JButton().apply {
@@ -581,8 +527,6 @@ class UninstallDialog(
             }
         }
 
-        private val sectionBg get() = UIManager.getColor("Table.stripeColor")
-            ?: Color(0x2A, 0x2B, 0x2E)
         private val sectionFg get() = UIManager.getColor("Label.disabledForeground") ?: Color.GRAY
 
         override fun getTableCellRendererComponent(
@@ -595,7 +539,8 @@ class UninstallDialog(
 
         private fun sectionCell(section: TableRow.Section, col: Int): Component =
             JPanel(BorderLayout()).apply {
-                background = sectionBg; isOpaque = true
+                background = table.background
+                isOpaque = true
                 if (col == UninstallTableModel.COL_APP) {
                     val chevron = if (tableModel.isSectionCollapsed(section.key)) "▸" else "▾"
                     add(JLabel("$chevron  ${section.title}").apply {
@@ -614,6 +559,9 @@ class UninstallDialog(
                 this.isSelected = r.selected
                 isEnabled = r.info.isUninstallable
                 background = rowBackground(tbl, row, r)
+                model.isRollover = false
+                model.isArmed = false
+                model.isPressed = false
             }
             UninstallTableModel.COL_ACTION -> {
                 actionPanel.apply {
@@ -650,7 +598,7 @@ class UninstallDialog(
 
         private fun appCell(rowData: TableRow.Data, tbl: JTable, row: Int): Component =
             JPanel(GridLayout(2, 1, 0, 0)).apply {
-                border = JBUI.Borders.empty(3, 0, 3, 16)
+                border = JBUI.Borders.empty(4, 0, 4, 16)
                 background = rowBackground(tbl, row, rowData)
                 isOpaque = true
                 val info = rowData.info
