@@ -19,14 +19,14 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.1"
+private const val PLUGIN_VERSION = "1.2.2"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
 private const val ACTION_BUTTON_SIZE = 32
 private const val ACTION_BUTTON_GAP = 8
-private const val DATA_ROW_HEIGHT = 56
-private const val SECTION_ROW_HEIGHT = 30
+private const val DATA_ROW_HEIGHT = 48
+private const val SECTION_ROW_HEIGHT = 28
 
 class UninstallDialog(
     project: Project,
@@ -574,8 +574,10 @@ class UninstallDialog(
                 minimumSize = preferredSize
                 maximumSize = preferredSize
                 isFocusable = false
+                isFocusPainted = false
                 isBorderPainted = false
                 isContentAreaFilled = false
+                isOpaque = false
                 margin = Insets(0, 0, 0, 0)
                 text = ""
             }
@@ -656,22 +658,31 @@ class UninstallDialog(
 
         private fun appCell(rowData: TableRow.Data, tbl: JTable, row: Int): Component =
             JPanel(GridLayout(2, 1, 0, 0)).apply {
-                border = JBUI.Borders.empty(5, 0, 5, 16)
+                border = JBUI.Borders.empty(3, 0, 3, 16)
                 background = rowBackground(tbl, row, rowData)
                 isOpaque = true
                 val info = rowData.info
-                val primary = info.moduleName.ifEmpty { info.packageName }
+                val primary = info.moduleName.ifEmpty { displayNameFromPackage(info.packageName) }
                 add(JLabel(primary).apply {
                     foreground = tbl.foreground
-                    font = font.deriveFont(Font.BOLD, 14f)
+                    font = font.deriveFont(Font.BOLD, 13.5f)
                 })
-                add(JLabel(if (info.moduleName.isEmpty()) "" else info.packageName).apply {
-                    foreground = UIManager.getColor("Label.disabledForeground") ?: tbl.foreground.darker()
-                    font = Font(Font.MONOSPACED, Font.PLAIN, 13)
+                add(JLabel(info.packageName).apply {
+                    foreground = UIManager.getColor("Label.foreground")?.darker()
+                        ?: UIManager.getColor("Label.disabledForeground")
+                        ?: tbl.foreground.darker()
+                    font = Font(Font.MONOSPACED, Font.BOLD, 13)
                 })
             }
     }
 }
+
+private fun displayNameFromPackage(packageName: String): String =
+    packageName.substringAfterLast('.')
+        .split('-', '_')
+        .filter { it.isNotBlank() }
+        .joinToString(" ") { it.replaceFirstChar { ch -> ch.uppercaseChar() } }
+        .ifBlank { packageName }
 
 private enum class RowAction {
     REINSTALL,
