@@ -40,7 +40,7 @@ class UninstallTableModel : AbstractTableModel() {
     /**
      * Rebuilds table:
      *   Project Apps section  — installed (↓ time) then not-installed/system-only (↓ status order)
-     *   Divider + Device Apps — only when deviceItems is non-empty (show-all mode)
+     *   User Apps — only when deviceItems is non-empty (show-all mode)
      */
     fun resetItems(projectItems: List<AppInstallInfo>, deviceItems: List<AppInstallInfo> = emptyList()) {
         this.projectItems = projectItems
@@ -54,6 +54,15 @@ class UninstallTableModel : AbstractTableModel() {
         rebuildRows()
     }
 
+    fun updateDeviceLabel(packageName: String, label: String) {
+        if (label.isBlank()) return
+        val info = deviceItems.firstOrNull { it.packageName == packageName } ?: return
+        if (info.moduleName == label) return
+        info.moduleName = label
+        val idx = rows.indexOfFirst { it is TableRow.Data && it.info.packageName == packageName }
+        if (idx >= 0) fireTableCellUpdated(idx, COL_APP)
+    }
+
     private fun rebuildRows() {
         rows.clear()
 
@@ -63,7 +72,7 @@ class UninstallTableModel : AbstractTableModel() {
             .forEach { rows.add(TableRow.Data(it)) }
 
         if (deviceItems.isNotEmpty()) {
-            rows.add(TableRow.Section(SectionKey.DEVICE, "Other User-Installed Apps"))
+            rows.add(TableRow.Section(SectionKey.DEVICE, "User Apps"))
             if (SectionKey.DEVICE !in collapsedSections) deviceItems.sortedByDescending { it.installTimeMs }
                 .forEach { rows.add(TableRow.Data(it)) }
         }

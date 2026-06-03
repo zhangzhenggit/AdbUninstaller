@@ -12,7 +12,7 @@ enum class InstallStatus {
 
 data class AppInstallInfo(
     val module: Module?,          // null for device-only apps (show-all mode)
-    val moduleName: String,
+    var moduleName: String,
     val packageName: String,
     var status: InstallStatus = InstallStatus.UNKNOWN,
     var installTimeMs: Long = 0L,

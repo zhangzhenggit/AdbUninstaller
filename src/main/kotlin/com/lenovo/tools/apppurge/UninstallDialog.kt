@@ -15,18 +15,19 @@ import java.awt.event.MouseEvent
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.12"
+private const val PLUGIN_VERSION = "1.2.13"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
 private const val ACTION_BUTTON_SIZE = 32
 private const val ACTION_BUTTON_GAP = 8
 private const val DATA_ROW_HEIGHT = 54
-private const val SECTION_ROW_HEIGHT = 28
+private const val SECTION_ROW_HEIGHT = 22
 
 class UninstallDialog(
     project: Project,
@@ -52,8 +53,14 @@ class UninstallDialog(
     private val clearingPackages = mutableSetOf<String>()
     private val uninstallingPackages = mutableSetOf<String>()
     private var actionSpinnerTimer: Timer? = null
+    private val nameResolveRunId = AtomicInteger(0)
     private val uninstallBtn = JButton("Uninstall Selected").apply {
         foreground = Color(0xD3, 0x56, 0x5C)
+    }
+    private val cancelNameResolveBtn = JButton("Stop").apply {
+        isVisible = false
+        margin = Insets(0, 8, 0, 8)
+        addActionListener { cancelNameResolving("Name resolving stopped") }
     }
 
     init {
@@ -162,10 +169,14 @@ class UninstallDialog(
         val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply {
             add(summaryLabel); add(uninstallBtn)
         }
+        val statusPanel = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
+            add(statusLabel)
+            add(cancelNameResolveBtn)
+        }
         val bottomPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.empty(14, 10, 10, 10)
             add(leftPanel, BorderLayout.WEST)
-            add(statusLabel, BorderLayout.CENTER)
+            add(statusPanel, BorderLayout.CENTER)
             add(rightPanel, BorderLayout.EAST)
         }
 
@@ -191,6 +202,11 @@ class UninstallDialog(
 
     override fun createActions(): Array<Action> = arrayOf(cancelAction)
 
+    override fun doCancelAction() {
+        cancelNameResolving()
+        super.doCancelAction()
+    }
+
     private fun currentSerial(): String? {
         val idx = deviceCombo.selectedIndex
         return if (idx >= 0 && idx < serials.size) serials[idx] else null
@@ -210,6 +226,18 @@ class UninstallDialog(
         updateSummary()
     }
 
+    private fun setNameResolving(resolving: Boolean) {
+        cancelNameResolveBtn.isVisible = resolving
+        cancelNameResolveBtn.parent?.revalidate()
+        cancelNameResolveBtn.parent?.repaint()
+    }
+
+    private fun cancelNameResolving(status: String? = null) {
+        nameResolveRunId.incrementAndGet()
+        setNameResolving(false)
+        if (status != null) setStatus(status)
+    }
+
     private fun updateRowHeights() {
         tableModel.rows.forEachIndexed { i, row ->
             when (row) {
@@ -220,6 +248,7 @@ class UninstallDialog(
     }
 
     private fun loadInstallStatus(serial: String, showAll: Boolean) {
+        cancelNameResolving()
         setLoading(true)
         setStatus(if (showAll) "Fetching all user apps…" else "Querying project modules…")
 
@@ -250,25 +279,36 @@ class UninstallDialog(
                 if (showAll) {
                     val projectPkgs = projectAppInfos.map { it.packageName }.toSet()
                     val userPkgs = (installedPkgs - systemPkgs - projectPkgs).sorted()
+                    val deviceItems = userPkgs.map { pkg ->
+                        AppInstallInfo(null, displayNameFromPackage(pkg), pkg, InstallStatus.INSTALLED)
+                    }
+                    val runId = nameResolveRunId.incrementAndGet()
                     SwingUtilities.invokeAndWait {
-                        tableModel.resetItems(projectAppInfos, emptyList())
+                        tableModel.resetItems(projectAppInfos, deviceItems)
                         updateRowHeights()
-                        setStatus("$projectInstalledCnt / ${projectAppInfos.size} project installed · loading device apps 0 / ${userPkgs.size}")
+                        setLoading(false)
+                        setNameResolving(true)
+                        setStatus("$projectInstalledCnt / ${projectAppInfos.size} project installed · resolving names 0 / ${userPkgs.size}")
                     }
 
                     userPkgs.forEachIndexed { index, pkg ->
+                        if (runId != nameResolveRunId.get()) return@forEachIndexed
                         val label = AdbService.getApplicationLabel(serial, pkg, adbPath)
+                        if (runId != nameResolveRunId.get()) return@forEachIndexed
                         val item = AppInstallInfo(null, label, pkg, InstallStatus.INSTALLED)
                         SwingUtilities.invokeAndWait {
-                            tableModel.addDeviceItem(item)
-                            updateRowHeights()
-                            setStatus("$projectInstalledCnt / ${projectAppInfos.size} project installed · loading device apps ${index + 1} / ${userPkgs.size}")
+                            if (runId == nameResolveRunId.get()) {
+                                tableModel.updateDeviceLabel(item.packageName, item.moduleName)
+                                setStatus("$projectInstalledCnt / ${projectAppInfos.size} project installed · resolving names ${index + 1} / ${userPkgs.size}")
+                            }
                         }
                     }
 
                     SwingUtilities.invokeLater {
-                        setLoading(false)
-                        setStatus("$projectInstalledCnt / ${projectAppInfos.size} project installed · ${userPkgs.size} device-only")
+                        if (runId == nameResolveRunId.get()) {
+                            setNameResolving(false)
+                            setStatus("$projectInstalledCnt / ${projectAppInfos.size} project installed · ${userPkgs.size} user apps")
+                        }
                     }
                 } else {
                     SwingUtilities.invokeLater {
@@ -280,6 +320,7 @@ class UninstallDialog(
                 }
             } catch (e: Exception) {
                 SwingUtilities.invokeLater {
+                    setNameResolving(false)
                     setStatus("Error: ${e.message ?: e.javaClass.simpleName}")
                     setLoading(false)
                 }
