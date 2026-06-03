@@ -19,7 +19,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.2"
+private const val PLUGIN_VERSION = "1.2.3"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -477,7 +477,7 @@ class UninstallDialog(
             info.packageName in clearingPackages ||
             info.packageName in uninstallingPackages) return false
         return when (action) {
-            RowAction.REINSTALL -> info.isFromProject
+            RowAction.REINSTALL -> info.isFromProject && info.apkFiles.isNotEmpty()
             RowAction.CLEAR -> info.status == InstallStatus.INSTALLED
             RowAction.UNINSTALL -> info.isUninstallable
         }
