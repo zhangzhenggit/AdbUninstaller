@@ -1,0 +1,113 @@
+package com.lenovo.tools.apppurge
+
+import javax.swing.table.AbstractTableModel
+
+sealed class TableRow {
+    class Section(val title: String) : TableRow()
+    object Divider : TableRow()
+    data class Data(val info: AppInstallInfo, var selected: Boolean = false) : TableRow()
+}
+
+class UninstallTableModel : AbstractTableModel() {
+
+    internal val rows: MutableList<TableRow> = mutableListOf()
+
+    val selectedItems: List<AppInstallInfo>
+        get() = rows.filterIsInstance<TableRow.Data>()
+            .filter { it.selected && it.info.isUninstallable }
+            .map { it.info }
+
+    /**
+     * Rebuilds table:
+     *   Project Apps section  — installed (↓ time) then not-installed/system-only (↓ status order)
+     *   Divider + Device Apps — only when deviceItems is non-empty (show-all mode)
+     */
+    fun resetItems(projectItems: List<AppInstallInfo>, deviceItems: List<AppInstallInfo> = emptyList()) {
+        rows.clear()
+
+        rows.add(TableRow.Section("Project Apps"))
+        projectItems
+            .sortedWith(compareBy<AppInstallInfo> { statusOrder(it) }.thenByDescending { it.installTimeMs }.thenBy { it.packageName })
+            .forEach { rows.add(TableRow.Data(it)) }
+
+        if (deviceItems.isNotEmpty()) {
+            rows.add(TableRow.Section("Other User-Installed Apps"))
+            deviceItems.sortedByDescending { it.installTimeMs }
+                .forEach { rows.add(TableRow.Data(it)) }
+        }
+
+        fireTableDataChanged()
+    }
+
+    fun updateRow(packageName: String, newStatus: InstallStatus, installTimeMs: Long = 0L) {
+        val idx = rows.indexOfFirst { it is TableRow.Data && it.info.packageName == packageName }
+        if (idx < 0) return
+        (rows[idx] as TableRow.Data).let {
+            it.info.status = newStatus
+            if (installTimeMs > 0L) it.info.installTimeMs = installTimeMs
+            it.selected = false
+        }
+        fireTableRowsUpdated(idx, idx)
+    }
+
+    fun setSelectAll(select: Boolean) {
+        rows.forEachIndexed { i, row ->
+            if (row is TableRow.Data && row.info.isUninstallable) {
+                row.selected = select
+                fireTableCellUpdated(i, COL_CHECK)
+            }
+        }
+    }
+
+    override fun getRowCount(): Int = rows.size
+    override fun getColumnCount(): Int = COLUMNS.size
+    override fun getColumnName(col: Int): String = COLUMNS[col]
+    override fun getColumnClass(col: Int): Class<*> =
+        if (col == COL_CHECK) Boolean::class.javaObjectType else String::class.java
+
+    override fun isCellEditable(row: Int, col: Int): Boolean {
+        val r = rows[row]
+        return col == COL_CHECK && r is TableRow.Data && r.info.isUninstallable
+    }
+
+    override fun getValueAt(row: Int, col: Int): Any = when (val r = rows[row]) {
+        is TableRow.Section -> when (col) { COL_CHECK -> false; COL_APP -> r.title; else -> "" }
+        is TableRow.Divider -> if (col == COL_CHECK) false else ""
+        is TableRow.Data -> when (col) {
+            COL_CHECK -> r.selected
+            COL_APP -> r.info.moduleName.ifEmpty { r.info.packageName }
+            COL_STATUS -> statusText(r.info)
+            COL_ACTION -> ""
+            else -> ""
+        }
+    }
+
+    override fun setValueAt(value: Any?, row: Int, col: Int) {
+        if (col == COL_CHECK && rows[row] is TableRow.Data) {
+            (rows[row] as TableRow.Data).selected = value as Boolean
+            fireTableCellUpdated(row, col)
+        }
+    }
+
+    companion object {
+        const val COL_CHECK = 0
+        const val COL_APP = 1
+        const val COL_STATUS = 2
+        const val COL_ACTION = 3
+        val COLUMNS = arrayOf("", "App", "Status", "Options")
+
+        private fun statusOrder(info: AppInstallInfo) = when (info.status) {
+            InstallStatus.INSTALLED -> 0
+            InstallStatus.NOT_INSTALLED -> 1
+            InstallStatus.SYSTEM_ONLY -> 2
+            InstallStatus.UNKNOWN -> 3
+        }
+
+        private fun statusText(info: AppInstallInfo) = when (info.status) {
+            InstallStatus.INSTALLED -> "Installed"
+            InstallStatus.NOT_INSTALLED -> "Not installed"
+            InstallStatus.SYSTEM_ONLY -> "System (cannot uninstall)"
+            InstallStatus.UNKNOWN -> "Querying…"
+        }
+    }
+}
