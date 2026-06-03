@@ -19,7 +19,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.7"
+private const val PLUGIN_VERSION = "1.2.8"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -77,6 +77,8 @@ class UninstallDialog(
             rowSelectionAllowed = false
             columnSelectionAllowed = false
             cellSelectionEnabled = false
+            selectionBackground = background
+            selectionForeground = foreground
             intercellSpacing = Dimension(1, 1)
             rowHeight = DATA_ROW_HEIGHT
             columnModel.getColumn(UninstallTableModel.COL_CHECK).apply { maxWidth = 54; minWidth = 54 }
@@ -242,7 +244,8 @@ class UninstallDialog(
                     val userPkgs = installedPkgs - systemPkgs
                     val projectPkgs = projectAppInfos.map { it.packageName }.toSet()
                     (userPkgs - projectPkgs).map { pkg ->
-                        AppInstallInfo(null, "", pkg, InstallStatus.INSTALLED)
+                        val label = AdbService.getApplicationLabel(serial, pkg, adbPath)
+                        AppInstallInfo(null, label, pkg, InstallStatus.INSTALLED)
                     }
                 } else emptyList()
 
@@ -597,17 +600,20 @@ class UninstallDialog(
         private fun rowBackground(tbl: JTable, row: Int, data: TableRow.Data): Color = tbl.background
 
         private fun appCell(rowData: TableRow.Data, tbl: JTable, row: Int): Component =
-            JPanel(GridLayout(2, 1, 0, 0)).apply {
-                border = JBUI.Borders.empty(4, 0, 4, 16)
+            JPanel().apply {
+                layout = BoxLayout(this, BoxLayout.Y_AXIS)
+                border = JBUI.Borders.empty(5, 10, 5, 16)
                 background = rowBackground(tbl, row, rowData)
                 isOpaque = true
                 val info = rowData.info
                 val primary = info.moduleName.ifEmpty { displayNameFromPackage(info.packageName) }
                 add(JLabel(primary).apply {
+                    alignmentX = Component.LEFT_ALIGNMENT
                     foreground = tbl.foreground
                     font = font.deriveFont(Font.BOLD, 13.5f)
                 })
                 add(JLabel(info.packageName).apply {
+                    alignmentX = Component.LEFT_ALIGNMENT
                     foreground = UIManager.getColor("Label.foreground")?.darker()
                         ?: UIManager.getColor("Label.disabledForeground")
                         ?: tbl.foreground.darker()

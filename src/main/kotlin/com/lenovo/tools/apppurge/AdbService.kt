@@ -69,6 +69,14 @@ object AdbService {
         }.getOrDefault(0L)
     }
 
+    fun getApplicationLabel(serial: String, packageName: String, adb: String): String {
+        val output = shell(serial, "dumpsys package $packageName", adb)
+        return output.lineSequence()
+            .mapNotNull(::extractNonLocalizedLabel)
+            .firstOrNull()
+            ?: ""
+    }
+
     fun uninstall(serial: String, packageName: String, adb: String): Boolean {
         return uninstallPackage(serial, packageName, adb).success
     }
@@ -104,6 +112,17 @@ object AdbService {
             .map { it.removePrefix("package:").trim() }
             .filter { it.isNotBlank() }
             .toSet()
+
+    private fun extractNonLocalizedLabel(line: String): String? {
+        if (!line.contains("nonLocalizedLabel=")) return null
+        val raw = line.substringAfter("nonLocalizedLabel=")
+            .substringBefore(" icon=")
+            .substringBefore(" banner=")
+            .substringBefore(" logo=")
+            .trim()
+            .trim('"', '\'')
+        return raw.takeIf { it.isNotBlank() && it != "null" && it != "0x0" }
+    }
 
     private fun shell(serial: String, command: String, adb: String): String =
         exec(listOf(adb, "-s", serial, "shell", command))
