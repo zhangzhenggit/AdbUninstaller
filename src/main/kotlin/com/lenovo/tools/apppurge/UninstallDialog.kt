@@ -20,7 +20,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.19"
+private const val PLUGIN_VERSION = "1.2.20"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -28,6 +28,7 @@ private const val ACTION_BUTTON_SIZE = 32
 private const val ACTION_BUTTON_GAP = 8
 private const val DATA_ROW_HEIGHT = 54
 private const val DIVIDER_ROW_HEIGHT = 6
+private const val DIVIDER_LINE_INSET = 18
 
 class UninstallDialog(
     project: Project,
@@ -75,13 +76,14 @@ class UninstallDialog(
         table = object : JBTable(tableModel) {
             override fun paintComponent(g: Graphics) {
                 super.paintComponent(g)
-                val lineColor = UIManager.getColor("Separator.foreground") ?: UIManager.getColor("Component.borderColor") ?: Color.GRAY
+                val baseColor = UIManager.getColor("Separator.foreground") ?: UIManager.getColor("Component.borderColor") ?: Color.GRAY
+                val lineColor = blendColors(baseColor, background, 0.55f)
                 g.color = lineColor
                 tableModel.rows.forEachIndexed { index, row ->
                     if (row is TableRow.Divider) {
                         val rect = getCellRect(index, 0, true)
                         val y = rect.y + rect.height / 2
-                        g.drawLine(0, y, width, y)
+                        g.drawLine(DIVIDER_LINE_INSET, y, width - DIVIDER_LINE_INSET, y)
                     }
                 }
             }
@@ -725,6 +727,16 @@ private fun displayNameFromPackage(packageName: String): String =
         .filter { it.isNotBlank() }
         .joinToString(" ") { it.replaceFirstChar { ch -> ch.uppercaseChar() } }
         .ifBlank { packageName }
+
+private fun blendColors(foreground: Color, background: Color, foregroundWeight: Float): Color {
+    val fg = foregroundWeight.coerceIn(0f, 1f)
+    val bg = 1f - fg
+    return Color(
+        (foreground.red * fg + background.red * bg).toInt(),
+        (foreground.green * fg + background.green * bg).toInt(),
+        (foreground.blue * fg + background.blue * bg).toInt(),
+    )
+}
 
 private enum class RowAction {
     REINSTALL,
