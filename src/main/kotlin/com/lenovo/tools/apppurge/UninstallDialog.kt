@@ -19,7 +19,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.11"
+private const val PLUGIN_VERSION = "1.2.12"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -656,14 +656,15 @@ class UninstallDialog(
                 add(JLabel(primary).apply {
                     alignmentX = Component.LEFT_ALIGNMENT
                     foreground = tbl.foreground
-                    font = font.deriveFont(Font.BOLD, 13.5f)
+                    font = font.deriveFont(Font.PLAIN, 13.5f)
                 })
+                add(Box.createVerticalStrut(1))
                 add(JLabel(info.packageName).apply {
                     alignmentX = Component.LEFT_ALIGNMENT
                     foreground = UIManager.getColor("Label.foreground")?.darker()
                         ?: UIManager.getColor("Label.disabledForeground")
                         ?: tbl.foreground.darker()
-                    font = Font(Font.MONOSPACED, Font.BOLD, 13)
+                    font = Font(Font.MONOSPACED, Font.PLAIN, 12)
                 })
             }
     }
