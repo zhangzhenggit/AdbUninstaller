@@ -20,7 +20,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.15"
+private const val PLUGIN_VERSION = "1.2.16"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -163,30 +163,14 @@ class UninstallDialog(
             add(summaryLabel); add(uninstallBtn)
         }
         val statusPanel = JPanel(FlowLayout(FlowLayout.CENTER, 6, 0)).apply {
-            isOpaque = false
             add(statusLabel)
             add(cancelNameResolveBtn)
         }
-        val bottomContent = JPanel(BorderLayout()).apply {
-            isOpaque = false
-            add(leftPanel, BorderLayout.WEST)
-            add(rightPanel, BorderLayout.EAST)
-        }
-        val bottomLayer = JLayeredPane().apply {
-            preferredSize = Dimension(1040, 36)
-            add(bottomContent, JLayeredPane.DEFAULT_LAYER)
-            add(statusPanel, JLayeredPane.PALETTE_LAYER)
-            addComponentListener(object : java.awt.event.ComponentAdapter() {
-                override fun componentResized(e: java.awt.event.ComponentEvent) {
-                    bottomContent.setBounds(0, 0, width, height)
-                    val statusSize = statusPanel.preferredSize
-                    statusPanel.setBounds((width - statusSize.width) / 2, 0, statusSize.width, height)
-                }
-            })
-        }
         val bottomPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.empty(14, 10, 10, 10)
-            add(bottomLayer, BorderLayout.CENTER)
+            add(leftPanel, BorderLayout.WEST)
+            add(statusPanel, BorderLayout.CENTER)
+            add(rightPanel, BorderLayout.EAST)
         }
 
         return JPanel(BorderLayout(0, 6)).apply {
