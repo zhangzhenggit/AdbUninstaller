@@ -19,7 +19,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.5"
+private const val PLUGIN_VERSION = "1.2.6"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -95,7 +95,7 @@ class UninstallDialog(
             intercellSpacing = Dimension(0, 0)
             rowHeight = DATA_ROW_HEIGHT
             fillsViewportHeight = true
-            columnModel.getColumn(UninstallTableModel.COL_CHECK).apply { maxWidth = 68; minWidth = 68 }
+            columnModel.getColumn(UninstallTableModel.COL_CHECK).apply { maxWidth = 54; minWidth = 54 }
             columnModel.getColumn(UninstallTableModel.COL_APP).preferredWidth = 400
             columnModel.getColumn(UninstallTableModel.COL_STATUS).preferredWidth = 300
             columnModel.getColumn(UninstallTableModel.COL_ACTION).apply { maxWidth = 192; minWidth = 192 }
@@ -126,22 +126,16 @@ class UninstallDialog(
                     }
                     val tableRow = tableModel.rows.getOrNull(row) as? TableRow.Data ?: return
                     when (col) {
-                        UninstallTableModel.COL_CHECK -> {
-                            if (tableRow.info.isUninstallable) {
-                                tableRow.selected = !tableRow.selected
-                                tableModel.fireTableRowsUpdated(row, row)
-                                updateSummary()
-                            }
-                        }
+                        UninstallTableModel.COL_CHECK -> return
                         UninstallTableModel.COL_ACTION -> {
-                        val info = tableRow.info
-                        val serial = currentSerial() ?: return
-                        when (actionAt(row, e.point.x)) {
-                            RowAction.REINSTALL -> chooseApkAndReinstall(serial, info)
-                            RowAction.CLEAR -> onClearData(serial, info)
-                            RowAction.UNINSTALL -> onUninstallOne(serial, info)
-                            null -> return
-                        }
+                            val info = tableRow.info
+                            val serial = currentSerial() ?: return
+                            when (actionAt(row, e.point.x)) {
+                                RowAction.REINSTALL -> chooseApkAndReinstall(serial, info)
+                                RowAction.CLEAR -> onClearData(serial, info)
+                                RowAction.UNINSTALL -> onUninstallOne(serial, info)
+                                null -> return
+                            }
                         }
                     }
                 }

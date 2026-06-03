@@ -111,7 +111,8 @@ class UninstallTableModel : AbstractTableModel() {
         if (col == COL_CHECK) Boolean::class.javaObjectType else String::class.java
 
     override fun isCellEditable(row: Int, col: Int): Boolean {
-        return false
+        val r = rows[row]
+        return col == COL_CHECK && r is TableRow.Data && r.info.isUninstallable
     }
 
     override fun getValueAt(row: Int, col: Int): Any = when (val r = rows[row]) {
