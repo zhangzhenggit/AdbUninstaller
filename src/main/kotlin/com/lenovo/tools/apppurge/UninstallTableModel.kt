@@ -3,14 +3,7 @@ package com.lenovo.tools.apppurge
 import javax.swing.table.AbstractTableModel
 
 sealed class TableRow {
-    class Section(val key: SectionKey, val title: String) : TableRow()
-    object Divider : TableRow()
     data class Data(val info: AppInstallInfo, var selected: Boolean = false) : TableRow()
-}
-
-enum class SectionKey {
-    PROJECT,
-    DEVICE,
 }
 
 class UninstallTableModel : AbstractTableModel() {
@@ -18,7 +11,6 @@ class UninstallTableModel : AbstractTableModel() {
     internal val rows: MutableList<TableRow> = mutableListOf()
     private var projectItems: List<AppInstallInfo> = emptyList()
     private var deviceItems: List<AppInstallInfo> = emptyList()
-    private val collapsedSections: MutableSet<SectionKey> = mutableSetOf()
 
     val selectedItems: List<AppInstallInfo>
         get() = rows.filterIsInstance<TableRow.Data>()
@@ -37,11 +29,6 @@ class UninstallTableModel : AbstractTableModel() {
     val allVisibleSelected: Boolean
         get() = installableVisibleCount > 0 && selectedCount == installableVisibleCount
 
-    /**
-     * Rebuilds table:
-     *   Project Apps section  — installed (↓ time) then not-installed/system-only (↓ status order)
-     *   User Apps — only when deviceItems is non-empty (show-all mode)
-     */
     fun resetItems(projectItems: List<AppInstallInfo>, deviceItems: List<AppInstallInfo> = emptyList()) {
         this.projectItems = projectItems
         this.deviceItems = deviceItems
@@ -51,6 +38,12 @@ class UninstallTableModel : AbstractTableModel() {
     fun addDeviceItem(item: AppInstallInfo) {
         if (deviceItems.any { it.packageName == item.packageName }) return
         deviceItems = deviceItems + item
+        rebuildRows()
+    }
+
+    fun removeDeviceItem(packageName: String) {
+        if (deviceItems.none { it.packageName == packageName }) return
+        deviceItems = deviceItems.filterNot { it.packageName == packageName }
         rebuildRows()
     }
 
@@ -66,16 +59,12 @@ class UninstallTableModel : AbstractTableModel() {
     private fun rebuildRows() {
         rows.clear()
 
-        rows.add(TableRow.Section(SectionKey.PROJECT, "Project Apps"))
-        if (SectionKey.PROJECT !in collapsedSections) projectItems
+        projectItems
             .sortedWith(compareBy<AppInstallInfo> { statusOrder(it) }.thenByDescending { it.installTimeMs }.thenBy { it.packageName })
             .forEach { rows.add(TableRow.Data(it)) }
 
-        if (deviceItems.isNotEmpty()) {
-            rows.add(TableRow.Section(SectionKey.DEVICE, "User Apps"))
-            if (SectionKey.DEVICE !in collapsedSections) deviceItems.sortedByDescending { it.installTimeMs }
-                .forEach { rows.add(TableRow.Data(it)) }
-        }
+        deviceItems.sortedByDescending { it.installTimeMs }
+            .forEach { rows.add(TableRow.Data(it)) }
 
         fireTableDataChanged()
     }
@@ -110,15 +99,6 @@ class UninstallTableModel : AbstractTableModel() {
         setSelectAll(!allVisibleSelected)
     }
 
-    fun toggleSectionAt(row: Int): Boolean {
-        val section = rows.getOrNull(row) as? TableRow.Section ?: return false
-        if (!collapsedSections.add(section.key)) collapsedSections.remove(section.key)
-        rebuildRows()
-        return true
-    }
-
-    fun isSectionCollapsed(key: SectionKey): Boolean = key in collapsedSections
-
     override fun getRowCount(): Int = rows.size
     override fun getColumnCount(): Int = COLUMNS.size
     override fun getColumnName(col: Int): String = COLUMNS[col]
@@ -131,8 +111,6 @@ class UninstallTableModel : AbstractTableModel() {
     }
 
     override fun getValueAt(row: Int, col: Int): Any = when (val r = rows[row]) {
-        is TableRow.Section -> when (col) { COL_CHECK -> false; COL_APP -> r.title; else -> "" }
-        is TableRow.Divider -> if (col == COL_CHECK) false else ""
         is TableRow.Data -> when (col) {
             COL_CHECK -> r.selected
             COL_APP -> r.info.moduleName.ifEmpty { r.info.packageName }

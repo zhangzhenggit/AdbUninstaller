@@ -20,14 +20,13 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.13"
+private const val PLUGIN_VERSION = "1.2.14"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
 private const val ACTION_BUTTON_SIZE = 32
 private const val ACTION_BUTTON_GAP = 8
 private const val DATA_ROW_HEIGHT = 54
-private const val SECTION_ROW_HEIGHT = 22
 
 class UninstallDialog(
     project: Project,
@@ -103,12 +102,6 @@ class UninstallDialog(
                     clearSelection()
                     val row = rowAtPoint(e.point)
                     val col = columnAtPoint(e.point)
-                    if (tableModel.rows.getOrNull(row) is TableRow.Section) {
-                        tableModel.toggleSectionAt(row)
-                        updateRowHeights()
-                        updateSummary()
-                        return
-                    }
                     val tableRow = tableModel.rows.getOrNull(row) as? TableRow.Data ?: return
                     when (col) {
                         UninstallTableModel.COL_CHECK -> return
@@ -240,10 +233,7 @@ class UninstallDialog(
 
     private fun updateRowHeights() {
         tableModel.rows.forEachIndexed { i, row ->
-            when (row) {
-                is TableRow.Section -> table.setRowHeight(i, SECTION_ROW_HEIGHT)
-                else -> table.setRowHeight(i, DATA_ROW_HEIGHT)
-            }
+            table.setRowHeight(i, DATA_ROW_HEIGHT)
         }
     }
 
@@ -288,7 +278,7 @@ class UninstallDialog(
                         updateRowHeights()
                         setLoading(false)
                         setNameResolving(true)
-                        setStatus("$projectInstalledCnt / ${projectAppInfos.size} project installed · resolving names 0 / ${userPkgs.size}")
+                        setStatus("Project Apps: ${projectAppInfos.size} · Installed Apps: ${userPkgs.size} · resolving names 0 / ${userPkgs.size}")
                     }
 
                     userPkgs.forEachIndexed { index, pkg ->
@@ -299,7 +289,7 @@ class UninstallDialog(
                         SwingUtilities.invokeAndWait {
                             if (runId == nameResolveRunId.get()) {
                                 tableModel.updateDeviceLabel(item.packageName, item.moduleName)
-                                setStatus("$projectInstalledCnt / ${projectAppInfos.size} project installed · resolving names ${index + 1} / ${userPkgs.size}")
+                                setStatus("Project Apps: ${projectAppInfos.size} · Installed Apps: ${userPkgs.size} · resolving names ${index + 1} / ${userPkgs.size}")
                             }
                         }
                     }
@@ -307,7 +297,7 @@ class UninstallDialog(
                     SwingUtilities.invokeLater {
                         if (runId == nameResolveRunId.get()) {
                             setNameResolving(false)
-                            setStatus("$projectInstalledCnt / ${projectAppInfos.size} project installed · ${userPkgs.size} user apps")
+                            setStatus("Project Apps: ${projectAppInfos.size} · Installed Apps: ${userPkgs.size}")
                         }
                     }
                 } else {
@@ -345,7 +335,12 @@ class UninstallDialog(
                 val ok = AdbService.uninstall(serial, info.packageName, adbPath)
                 if (ok) successCnt++
                 SwingUtilities.invokeLater {
-                    tableModel.updateRow(info.packageName, if (ok) InstallStatus.NOT_INSTALLED else info.status)
+                    if (ok && !info.isFromProject) {
+                        tableModel.removeDeviceItem(info.packageName)
+                        updateRowHeights()
+                    } else {
+                        tableModel.updateRow(info.packageName, if (ok) InstallStatus.NOT_INSTALLED else info.status)
+                    }
                 }
             }
             SwingUtilities.invokeLater {
@@ -420,7 +415,12 @@ class UninstallDialog(
                 uninstallingPackages.remove(info.packageName)
                 refreshActionRendering()
                 if (result.success) {
-                    tableModel.updateRow(info.packageName, InstallStatus.NOT_INSTALLED)
+                    if (info.isFromProject) {
+                        tableModel.updateRow(info.packageName, InstallStatus.NOT_INSTALLED)
+                    } else {
+                        tableModel.removeDeviceItem(info.packageName)
+                        updateRowHeights()
+                    }
                     setStatus("Uninstalled ${info.packageName}")
                 } else {
                     setStatus("Uninstall failed: ${info.packageName}")
@@ -614,29 +614,11 @@ class UninstallDialog(
             }
         }
 
-        private val sectionFg get() = UIManager.getColor("Label.disabledForeground") ?: Color.GRAY
-
         override fun getTableCellRendererComponent(
             tbl: JTable, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, col: Int,
         ): Component = when (val r = tableModel.rows[row]) {
-            is TableRow.Section -> sectionCell(r, col)
-            is TableRow.Divider -> JPanel().apply { background = tbl.background; isOpaque = true }
-            is TableRow.Data   -> dataCell(r, tbl, value, isSelected, hasFocus, row, col)
+            is TableRow.Data -> dataCell(r, tbl, value, isSelected, hasFocus, row, col)
         }
-
-        private fun sectionCell(section: TableRow.Section, col: Int): Component =
-            JPanel(BorderLayout()).apply {
-                background = table.background
-                isOpaque = true
-                if (col == UninstallTableModel.COL_APP) {
-                    val chevron = if (tableModel.isSectionCollapsed(section.key)) "▸" else "▾"
-                    add(JLabel("$chevron  ${section.title}").apply {
-                        foreground = sectionFg
-                        font = font.deriveFont(Font.BOLD, 13f)
-                        border = JBUI.Borders.empty(0, 4)
-                    }, BorderLayout.WEST)
-                }
-            }
 
         private fun dataCell(
             r: TableRow.Data, tbl: JTable, value: Any?,
