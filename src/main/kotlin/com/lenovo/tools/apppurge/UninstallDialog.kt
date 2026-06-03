@@ -19,7 +19,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.10"
+private const val PLUGIN_VERSION = "1.2.11"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -43,7 +43,9 @@ class UninstallDialog(
     private val toggleWrapper = JPanel(CardLayout())
     private lateinit var tableModel: UninstallTableModel
     private lateinit var table: JBTable
-    private val statusLabel = JLabel("Ready")
+    private val statusLabel = JLabel("Ready").apply {
+        foreground = UIManager.getColor("Label.disabledForeground")
+    }
     private val summaryLabel = JLabel()
     private var loading = false
     private val reinstallingPackages = mutableSetOf<String>()
@@ -163,6 +165,7 @@ class UninstallDialog(
         val bottomPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.empty(14, 10, 10, 10)
             add(leftPanel, BorderLayout.WEST)
+            add(statusLabel, BorderLayout.CENTER)
             add(rightPanel, BorderLayout.EAST)
         }
 
@@ -241,27 +244,39 @@ class UninstallDialog(
                     if (info.module != null) info.apkFiles = ApkFinder.findApks(info.module)
                 }
 
-                val deviceItems: List<AppInstallInfo> = if (showAll) {
-                    val userPkgs = installedPkgs - systemPkgs
-                    val projectPkgs = projectAppInfos.map { it.packageName }.toSet()
-                    (userPkgs - projectPkgs).map { pkg ->
-                        val label = AdbService.getApplicationLabel(serial, pkg, adbPath)
-                        AppInstallInfo(null, label, pkg, InstallStatus.INSTALLED)
-                    }
-                } else emptyList()
-
                 val projectInstalledCnt = projectAppInfos.count { it.status == InstallStatus.INSTALLED }
-                val statusMsg = if (showAll) {
-                    "$projectInstalledCnt / ${projectAppInfos.size} project installed · ${deviceItems.size} device-only"
-                } else {
-                    "$projectInstalledCnt / ${projectAppInfos.size} installed"
-                }
+                val projectStatusMsg = "$projectInstalledCnt / ${projectAppInfos.size} installed"
 
-                SwingUtilities.invokeLater {
-                    tableModel.resetItems(projectAppInfos, deviceItems)
-                    updateRowHeights()
-                    setLoading(false)
-                    setStatus(statusMsg)
+                if (showAll) {
+                    val projectPkgs = projectAppInfos.map { it.packageName }.toSet()
+                    val userPkgs = (installedPkgs - systemPkgs - projectPkgs).sorted()
+                    SwingUtilities.invokeAndWait {
+                        tableModel.resetItems(projectAppInfos, emptyList())
+                        updateRowHeights()
+                        setStatus("$projectInstalledCnt / ${projectAppInfos.size} project installed · loading device apps 0 / ${userPkgs.size}")
+                    }
+
+                    userPkgs.forEachIndexed { index, pkg ->
+                        val label = AdbService.getApplicationLabel(serial, pkg, adbPath)
+                        val item = AppInstallInfo(null, label, pkg, InstallStatus.INSTALLED)
+                        SwingUtilities.invokeAndWait {
+                            tableModel.addDeviceItem(item)
+                            updateRowHeights()
+                            setStatus("$projectInstalledCnt / ${projectAppInfos.size} project installed · loading device apps ${index + 1} / ${userPkgs.size}")
+                        }
+                    }
+
+                    SwingUtilities.invokeLater {
+                        setLoading(false)
+                        setStatus("$projectInstalledCnt / ${projectAppInfos.size} project installed · ${userPkgs.size} device-only")
+                    }
+                } else {
+                    SwingUtilities.invokeLater {
+                        tableModel.resetItems(projectAppInfos)
+                        updateRowHeights()
+                        setLoading(false)
+                        setStatus(projectStatusMsg)
+                    }
                 }
             } catch (e: Exception) {
                 SwingUtilities.invokeLater {

@@ -48,6 +48,12 @@ class UninstallTableModel : AbstractTableModel() {
         rebuildRows()
     }
 
+    fun addDeviceItem(item: AppInstallInfo) {
+        if (deviceItems.any { it.packageName == item.packageName }) return
+        deviceItems = deviceItems + item
+        rebuildRows()
+    }
+
     private fun rebuildRows() {
         rows.clear()
 
