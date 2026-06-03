@@ -19,7 +19,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.3"
+private const val PLUGIN_VERSION = "1.2.4"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -94,6 +94,9 @@ class UninstallDialog(
             }
         }.apply {
             setShowGrid(false)
+            rowSelectionAllowed = false
+            columnSelectionAllowed = false
+            cellSelectionEnabled = false
             intercellSpacing = Dimension(0, 0)
             rowHeight = DATA_ROW_HEIGHT
             fillsViewportHeight = true
@@ -117,6 +120,7 @@ class UninstallDialog(
 
             addMouseListener(object : MouseAdapter() {
                 override fun mouseClicked(e: MouseEvent) {
+                    clearSelection()
                     val row = rowAtPoint(e.point)
                     val col = columnAtPoint(e.point)
                     if (tableModel.rows.getOrNull(row) is TableRow.Section) {
@@ -638,14 +642,12 @@ class UninstallDialog(
             }
             UninstallTableModel.COL_APP -> appCell(r, tbl, row)
             else -> {
-                val c = textRenderer.getTableCellRendererComponent(tbl, value, isSelected, hasFocus, row, col)
+                val c = textRenderer.getTableCellRendererComponent(tbl, value, false, false, row, col)
                 c.background = rowBackground(tbl, row, r)
                 (c as? JLabel)?.border = JBUI.Borders.emptyLeft(16)
-                if (!isSelected) {
-                    (c as? JLabel)?.foreground = when (r.info.status) {
-                        InstallStatus.INSTALLED -> Color(0x82, 0xCC, 0x8D)
-                        else -> UIManager.getColor("Label.disabledForeground") ?: Color(0x9A, 0x9D, 0xA4)
-                    }
+                (c as? JLabel)?.foreground = when (r.info.status) {
+                    InstallStatus.INSTALLED -> Color(0x82, 0xCC, 0x8D)
+                    else -> UIManager.getColor("Label.disabledForeground") ?: Color(0x9A, 0x9D, 0xA4)
                 }
                 c
             }
