@@ -3,6 +3,7 @@ package com.lenovo.tools.apppurge
 import javax.swing.table.AbstractTableModel
 
 sealed class TableRow {
+    object Divider : TableRow()
     data class Data(val info: AppInstallInfo, var selected: Boolean = false) : TableRow()
 }
 
@@ -63,6 +64,8 @@ class UninstallTableModel : AbstractTableModel() {
             .sortedWith(compareBy<AppInstallInfo> { statusOrder(it) }.thenByDescending { it.installTimeMs }.thenBy { it.packageName })
             .forEach { rows.add(TableRow.Data(it)) }
 
+        if (deviceItems.isNotEmpty()) rows.add(TableRow.Divider)
+
         deviceItems.sortedByDescending { it.installTimeMs }
             .forEach { rows.add(TableRow.Data(it)) }
 
@@ -111,6 +114,7 @@ class UninstallTableModel : AbstractTableModel() {
     }
 
     override fun getValueAt(row: Int, col: Int): Any = when (val r = rows[row]) {
+        is TableRow.Divider -> if (col == COL_CHECK) false else ""
         is TableRow.Data -> when (col) {
             COL_CHECK -> r.selected
             COL_APP -> r.info.moduleName.ifEmpty { r.info.packageName }

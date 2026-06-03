@@ -20,13 +20,14 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.17"
+private const val PLUGIN_VERSION = "1.2.18"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
 private const val ACTION_BUTTON_SIZE = 32
 private const val ACTION_BUTTON_GAP = 8
 private const val DATA_ROW_HEIGHT = 54
+private const val DIVIDER_ROW_HEIGHT = 12
 
 class UninstallDialog(
     project: Project,
@@ -240,7 +241,7 @@ class UninstallDialog(
 
     private fun updateRowHeights() {
         tableModel.rows.forEachIndexed { i, row ->
-            table.setRowHeight(i, DATA_ROW_HEIGHT)
+            table.setRowHeight(i, if (row is TableRow.Divider) DIVIDER_ROW_HEIGHT else DATA_ROW_HEIGHT)
         }
     }
 
@@ -622,8 +623,21 @@ class UninstallDialog(
         override fun getTableCellRendererComponent(
             tbl: JTable, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, col: Int,
         ): Component = when (val r = tableModel.rows[row]) {
+            is TableRow.Divider -> dividerCell(tbl, col)
             is TableRow.Data -> dataCell(r, tbl, value, isSelected, hasFocus, row, col)
         }
+
+        private fun dividerCell(tbl: JTable, col: Int): Component =
+            JPanel(BorderLayout()).apply {
+                background = tbl.background
+                isOpaque = true
+                if (col == UninstallTableModel.COL_APP) {
+                    add(JSeparator().apply {
+                        foreground = UIManager.getColor("Separator.foreground")
+                    }, BorderLayout.CENTER)
+                    border = JBUI.Borders.empty(5, 10, 5, 16)
+                }
+            }
 
         private fun dataCell(
             r: TableRow.Data, tbl: JTable, value: Any?,
