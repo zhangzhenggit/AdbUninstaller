@@ -8,6 +8,7 @@ object AdbService {
 
     private val isWindows = System.getProperty("os.name").lowercase().contains("win")
     private val adbExe = if (isWindows) "adb.exe" else "adb"
+    private val labelCache = mutableMapOf<String, String>()
 
     fun adbPath(projectBasePath: String? = null): String {
         // 1. ANDROID_HOME / ANDROID_SDK_ROOT
@@ -70,11 +71,15 @@ object AdbService {
     }
 
     fun getApplicationLabel(serial: String, packageName: String, adb: String): String {
+        val cacheKey = "$serial:$packageName"
+        labelCache[cacheKey]?.let { return it }
         val output = shell(serial, "dumpsys package $packageName", adb)
-        return output.lineSequence()
+        val label = output.lineSequence()
             .mapNotNull(::extractNonLocalizedLabel)
             .firstOrNull()
-            ?: ""
+            ?: getApplicationLabelFromApk(serial, packageName, adb)
+        labelCache[cacheKey] = label
+        return label
     }
 
     fun uninstall(serial: String, packageName: String, adb: String): Boolean {
@@ -122,6 +127,82 @@ object AdbService {
             .trim()
             .trim('"', '\'')
         return raw.takeIf { it.isNotBlank() && it != "null" && it != "0x0" }
+    }
+
+    private fun getApplicationLabelFromApk(serial: String, packageName: String, adb: String): String {
+        val aapt = findAapt(adb) ?: return ""
+        val remoteApk = getPackageBaseApkPath(serial, packageName, adb) ?: return ""
+        val localApk = File.createTempFile("apppurge-${packageName.replace(Regex("[^A-Za-z0-9._-]"), "_")}-", ".apk")
+        return try {
+            val pullOutput = exec(listOf(adb, "-s", serial, "pull", remoteApk, localApk.absolutePath), timeoutSec = 45)
+            if (!pullOutput.contains("pulled", ignoreCase = true) && localApk.length() == 0L) return ""
+            val badging = exec(listOf(aapt.absolutePath, "dump", "badging", localApk.absolutePath), timeoutSec = 20)
+            chooseLocalizedLabel(badging, getDeviceLocale(serial, adb))
+        } finally {
+            runCatching { localApk.delete() }
+        }
+    }
+
+    private fun getPackageBaseApkPath(serial: String, packageName: String, adb: String): String? =
+        shell(serial, "pm path $packageName", adb)
+            .lineSequence()
+            .filter { it.startsWith("package:") }
+            .map { it.removePrefix("package:").trim() }
+            .filter { it.isNotBlank() }
+            .sortedWith(compareByDescending<String> { it.endsWith("/base.apk") || it.endsWith("base.apk") }.thenBy { it })
+            .firstOrNull()
+
+    private fun getDeviceLocale(serial: String, adb: String): String {
+        val locale = shell(serial, "getprop persist.sys.locale", adb).trim()
+            .ifBlank { shell(serial, "getprop ro.product.locale", adb).trim() }
+        if (locale.isNotBlank()) return locale
+        val language = shell(serial, "getprop persist.sys.language", adb).trim()
+        val country = shell(serial, "getprop persist.sys.country", adb).trim()
+        return listOf(language, country).filter { it.isNotBlank() }.joinToString("-")
+    }
+
+    private fun findAapt(adb: String): File? {
+        val sdkCandidates = sequenceOf(
+            System.getenv("ANDROID_HOME"),
+            System.getenv("ANDROID_SDK_ROOT"),
+            File(adb).takeIf { it.exists() }?.parentFile?.parentFile?.absolutePath,
+        ).filterNotNull()
+            .map { File(it) }
+            .filter { it.exists() }
+            .distinctBy { it.absolutePath }
+
+        val names = if (isWindows) listOf("aapt2.exe", "aapt.exe") else listOf("aapt2", "aapt")
+        return sdkCandidates.flatMap { sdk ->
+            val buildTools = File(sdk, "build-tools")
+            if (!buildTools.exists()) emptySequence() else buildTools.listFiles()
+                ?.asSequence()
+                ?.filter { it.isDirectory }
+                ?.sortedByDescending { it.name }
+                ?.flatMap { versionDir -> names.asSequence().map { File(versionDir, it) } }
+                ?: emptySequence()
+        }.firstOrNull { it.exists() && it.canExecute() }
+    }
+
+    private fun chooseLocalizedLabel(badging: String, locale: String): String {
+        val labels = linkedMapOf<String, String>()
+        val regex = Regex("""^application-label(?:-([^:]+))?:'(.+)'$""")
+        badging.lineSequence().forEach { line ->
+            val match = regex.find(line.trim()) ?: return@forEach
+            labels[match.groupValues.getOrNull(1).orEmpty()] = match.groupValues[2]
+        }
+        if (labels.isEmpty()) return ""
+
+        val normalized = locale.replace('_', '-')
+        val parts = normalized.split('-').filter { it.isNotBlank() }
+        val candidates = buildList {
+            if (normalized.isNotBlank()) add(normalized)
+            if (parts.size >= 2) add("${parts[0]}-${parts[1]}")
+            if (parts.isNotEmpty()) add(parts[0])
+            add("")
+        }
+        return candidates.firstNotNullOfOrNull { candidate ->
+            labels.entries.firstOrNull { it.key.equals(candidate, ignoreCase = true) }?.value
+        } ?: labels[""] ?: labels.values.first()
     }
 
     private fun shell(serial: String, command: String, adb: String): String =
