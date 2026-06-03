@@ -19,7 +19,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.8"
+private const val PLUGIN_VERSION = "1.2.9"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -49,6 +49,7 @@ class UninstallDialog(
     private val reinstallingPackages = mutableSetOf<String>()
     private val clearingPackages = mutableSetOf<String>()
     private val uninstallingPackages = mutableSetOf<String>()
+    private var actionSpinnerTimer: Timer? = null
     private val uninstallBtn = JButton("Uninstall Selected").apply {
         foreground = Color(0xD3, 0x56, 0x5C)
     }
@@ -331,13 +332,13 @@ class UninstallDialog(
                 "AppPurge", "Clear Data", "Cancel", Messages.getQuestionIcon(),
             ) != Messages.OK) return
         if (!clearingPackages.add(info.packageName)) return
-        table.repaint()
+        refreshActionRendering()
         setStatus("Clearing data for ${info.packageName}…")
         Thread {
             val result = AdbService.clearAppData(serial, info.packageName, adbPath)
             SwingUtilities.invokeLater {
                 clearingPackages.remove(info.packageName)
-                table.repaint()
+                refreshActionRendering()
                 if (result.success) {
                     setStatus("Cleared data: ${info.packageName}")
                 } else {
@@ -355,13 +356,13 @@ class UninstallDialog(
                 "AppPurge", "Uninstall", "Cancel", Messages.getQuestionIcon(),
             ) != Messages.OK) return
         if (!uninstallingPackages.add(info.packageName)) return
-        table.repaint()
+        refreshActionRendering()
         setStatus("Uninstalling ${info.packageName}…")
         Thread {
             val result = AdbService.uninstallPackage(serial, info.packageName, adbPath)
             SwingUtilities.invokeLater {
                 uninstallingPackages.remove(info.packageName)
-                table.repaint()
+                refreshActionRendering()
                 if (result.success) {
                     tableModel.updateRow(info.packageName, InstallStatus.NOT_INSTALLED)
                     setStatus("Uninstalled ${info.packageName}")
@@ -375,7 +376,7 @@ class UninstallDialog(
 
     private fun onReinstall(serial: String, info: AppInstallInfo, apk: File) {
         if (!reinstallingPackages.add(info.packageName)) return
-        table.repaint()
+        refreshActionRendering()
         setStatus("Installing ${info.packageName}…")
         Thread {
             val result = AdbService.installApk(serial, apk.absolutePath, adbPath)
@@ -391,7 +392,7 @@ class UninstallDialog(
             }
             SwingUtilities.invokeLater {
                 reinstallingPackages.remove(info.packageName)
-                table.repaint()
+                refreshActionRendering()
                 if (installed) {
                     tableModel.updateRow(info.packageName, InstallStatus.INSTALLED, installTimeMs)
                     setStatus("Installed ${info.packageName}")
@@ -441,17 +442,43 @@ class UninstallDialog(
         return action.takeIf { isActionEnabled(it, info) }
     }
 
+    private fun activeAction(info: AppInstallInfo): RowAction? = when (info.packageName) {
+        in reinstallingPackages -> RowAction.REINSTALL
+        in clearingPackages -> RowAction.CLEAR
+        in uninstallingPackages -> RowAction.UNINSTALL
+        else -> null
+    }
+
     private fun isActionEnabled(action: RowAction, info: AppInstallInfo): Boolean {
         if (currentSerial() == null) return false
-        if (info.packageName in reinstallingPackages ||
-            info.packageName in clearingPackages ||
-            info.packageName in uninstallingPackages) return false
+        if (activeAction(info) != null) return false
         return when (action) {
             RowAction.REINSTALL -> info.isFromProject && info.apkFiles.isNotEmpty()
             RowAction.CLEAR -> info.status == InstallStatus.INSTALLED
             RowAction.UNINSTALL -> info.isUninstallable
         }
     }
+
+    private fun refreshActionRendering() {
+        if (this::table.isInitialized) table.repaint()
+        if (hasActiveAction()) {
+            if (actionSpinnerTimer == null) {
+                actionSpinnerTimer = Timer(120) {
+                    if (this::table.isInitialized) table.repaint()
+                    if (!hasActiveAction()) {
+                        actionSpinnerTimer?.stop()
+                        actionSpinnerTimer = null
+                    }
+                }.apply { start() }
+            }
+        } else {
+            actionSpinnerTimer?.stop()
+            actionSpinnerTimer = null
+        }
+    }
+
+    private fun hasActiveAction(): Boolean =
+        reinstallingPackages.isNotEmpty() || clearingPackages.isNotEmpty() || uninstallingPackages.isNotEmpty()
 
     private fun appTooltip(info: AppInstallInfo): String {
         val module = info.moduleName.ifEmpty { "Device-only app" }
@@ -505,6 +532,7 @@ class UninstallDialog(
 
     private inner class UniversalRenderer : TableCellRenderer {
         private val textRenderer = DefaultTableCellRenderer()
+        private val spinnerIcon = AnimatedIcon.Default()
         private val checkbox = JCheckBox().apply {
             isOpaque = true
             horizontalAlignment = SwingConstants.CENTER
@@ -570,11 +598,14 @@ class UninstallDialog(
                 actionPanel.apply {
                     removeAll()
                     background = rowBackground(tbl, row, r)
+                    val activeAction = activeAction(r.info)
                     RowAction.entries.forEachIndexed { index, action ->
                         val enabled = isActionEnabled(action, r.info)
                         actionButtons[index].apply {
                             isEnabled = enabled
-                            toolTipText = action.tooltip(r.info)
+                            icon = if (activeAction == action) spinnerIcon else action.enabledIcon
+                            disabledIcon = if (activeAction == action) spinnerIcon else action.disabledIcon
+                            toolTipText = if (activeAction == action) action.loadingTooltip else action.tooltip(r.info)
                             background = actionPanel.background
                         }
                         add(actionButtons[index], GridBagConstraints().apply {
@@ -657,4 +688,11 @@ private enum class RowAction {
         CLEAR -> "Clear app data"
         UNINSTALL -> "Uninstall"
     }
+
+    val loadingTooltip: String
+        get() = when (this) {
+            REINSTALL -> "Installing..."
+            CLEAR -> "Clearing data..."
+            UNINSTALL -> "Uninstalling..."
+        }
 }
