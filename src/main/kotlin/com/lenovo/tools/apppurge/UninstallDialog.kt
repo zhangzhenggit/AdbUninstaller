@@ -19,12 +19,14 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.0"
+private const val PLUGIN_VERSION = "1.2.1"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
-private const val ACTION_BUTTON_SIZE = 36
+private const val ACTION_BUTTON_SIZE = 32
 private const val ACTION_BUTTON_GAP = 8
+private const val DATA_ROW_HEIGHT = 56
+private const val SECTION_ROW_HEIGHT = 30
 
 class UninstallDialog(
     project: Project,
@@ -43,7 +45,6 @@ class UninstallDialog(
     private lateinit var table: JBTable
     private val statusLabel = JLabel("Ready")
     private val summaryLabel = JLabel()
-    private var hoverRow = -1
     private var loading = false
     private val reinstallingPackages = mutableSetOf<String>()
     private val clearingPackages = mutableSetOf<String>()
@@ -94,7 +95,7 @@ class UninstallDialog(
         }.apply {
             setShowGrid(false)
             intercellSpacing = Dimension(0, 0)
-            rowHeight = 68
+            rowHeight = DATA_ROW_HEIGHT
             fillsViewportHeight = true
             columnModel.getColumn(UninstallTableModel.COL_CHECK).apply { maxWidth = 54; minWidth = 54 }
             columnModel.getColumn(UninstallTableModel.COL_APP).preferredWidth = 400
@@ -103,7 +104,7 @@ class UninstallDialog(
             val renderer = UniversalRenderer()
             for (i in 0 until columnCount) columnModel.getColumn(i).cellRenderer = renderer
             tableHeader.defaultRenderer = HeaderRenderer(tableHeader.defaultRenderer)
-            tableHeader.preferredSize = Dimension(tableHeader.preferredSize.width, 42)
+            tableHeader.preferredSize = Dimension(tableHeader.preferredSize.width, 38)
             tableHeader.addMouseListener(object : MouseAdapter() {
                 override fun mouseClicked(e: MouseEvent) {
                     if (columnAtPoint(e.point) == UninstallTableModel.COL_CHECK) {
@@ -141,23 +142,6 @@ class UninstallDialog(
                     }
                 }
             })
-            addMouseMotionListener(object : MouseAdapter() {
-                override fun mouseMoved(e: MouseEvent) {
-                    val row = rowAtPoint(e.point)
-                    if (row == hoverRow) return
-                    val old = hoverRow
-                    hoverRow = row
-                    if (old >= 0) repaint(getCellRect(old, 0, true).apply { width = table.width })
-                    if (hoverRow >= 0) repaint(getCellRect(hoverRow, 0, true).apply { width = table.width })
-                }
-            })
-            addMouseListener(object : MouseAdapter() {
-                override fun mouseExited(e: MouseEvent) {
-                    val old = hoverRow
-                    hoverRow = -1
-                    if (old >= 0) repaint(getCellRect(old, 0, true).apply { width = table.width })
-                }
-            })
         }
 
         val spinnerLabel = JLabel("Fetching device apps…", AnimatedIcon.Default(), SwingConstants.LEFT).apply {
@@ -182,8 +166,8 @@ class UninstallDialog(
         }
 
         val tableScroll = JBScrollPane(table).apply {
-            preferredSize = Dimension(1040, 520)
-            border = JBUI.Borders.customLine(UIManager.getColor("Separator.foreground") ?: Color(0x3A, 0x3C, 0x41), 1, 0, 1, 0)
+            preferredSize = Dimension(1040, 480)
+            border = JBUI.Borders.empty()
             viewport.background = table.background
         }
 
@@ -256,8 +240,8 @@ class UninstallDialog(
     private fun updateRowHeights() {
         tableModel.rows.forEachIndexed { i, row ->
             when (row) {
-                is TableRow.Section -> table.setRowHeight(i, 34)
-                else -> table.setRowHeight(i, 68)
+                is TableRow.Section -> table.setRowHeight(i, SECTION_ROW_HEIGHT)
+                else -> table.setRowHeight(i, DATA_ROW_HEIGHT)
             }
         }
     }
@@ -465,7 +449,6 @@ class UninstallDialog(
         summaryLabel.text = buildString {
             if (selected > 0) append("$selected selected · ")
             append("$installed / ${visible.size} installed")
-            if (statusLabel.text.isNotBlank()) append(" · ${statusLabel.text}")
         }
         summaryLabel.foreground = UIManager.getColor("Label.disabledForeground") ?: Color.GRAY
         uninstallBtn.text = if (selected > 0) "Uninstall Selected ($selected)" else "Uninstall Selected"
@@ -582,7 +565,7 @@ class UninstallDialog(
     private inner class UniversalRenderer : TableCellRenderer {
         private val textRenderer = DefaultTableCellRenderer()
         private val checkbox = JCheckBox().apply { isOpaque = true; horizontalAlignment = SwingConstants.CENTER }
-        private val actionPanel = JPanel(FlowLayout(FlowLayout.CENTER, ACTION_BUTTON_GAP, 0)).apply { isOpaque = true }
+        private val actionPanel = JPanel(GridBagLayout()).apply { isOpaque = true }
         private val actionButtons = RowAction.entries.map { action ->
             JButton().apply {
                 icon = action.enabledIcon
@@ -602,7 +585,6 @@ class UninstallDialog(
             ?: Color(0x2A, 0x2B, 0x2E)
         private val sectionFg get() = UIManager.getColor("Label.disabledForeground") ?: Color.GRAY
         private val selectedBg = Color(0x35, 0x74, 0xF0, 34)
-        private val hoverBg = UIManager.getColor("Table.hoverBackground") ?: Color(0x27, 0x29, 0x2D)
 
         override fun getTableCellRendererComponent(
             tbl: JTable, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, col: Int,
@@ -645,7 +627,10 @@ class UninstallDialog(
                             toolTipText = action.tooltip(r.info)
                             background = actionPanel.background
                         }
-                        add(actionButtons[index])
+                        add(actionButtons[index], GridBagConstraints().apply {
+                            gridx = index
+                            insets = Insets(0, if (index == 0) 0 else ACTION_BUTTON_GAP, 0, 0)
+                        })
                     }
                 }
             }
@@ -666,24 +651,23 @@ class UninstallDialog(
 
         private fun rowBackground(tbl: JTable, row: Int, data: TableRow.Data): Color = when {
             data.selected -> selectedBg
-            row == hoverRow -> hoverBg
             else -> tbl.background
         }
 
         private fun appCell(rowData: TableRow.Data, tbl: JTable, row: Int): Component =
             JPanel(GridLayout(2, 1, 0, 0)).apply {
-                border = JBUI.Borders.empty(8, 0, 8, 16)
+                border = JBUI.Borders.empty(5, 0, 5, 16)
                 background = rowBackground(tbl, row, rowData)
                 isOpaque = true
                 val info = rowData.info
                 val primary = info.moduleName.ifEmpty { info.packageName }
                 add(JLabel(primary).apply {
                     foreground = tbl.foreground
-                    font = font.deriveFont(Font.BOLD, 14.5f)
+                    font = font.deriveFont(Font.BOLD, 14f)
                 })
                 add(JLabel(if (info.moduleName.isEmpty()) "" else info.packageName).apply {
                     foreground = UIManager.getColor("Label.disabledForeground") ?: tbl.foreground.darker()
-                    font = Font(Font.MONOSPACED, Font.PLAIN, 12)
+                    font = Font(Font.MONOSPACED, Font.PLAIN, 13)
                 })
             }
     }
