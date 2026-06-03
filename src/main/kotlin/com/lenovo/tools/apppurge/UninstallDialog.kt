@@ -20,14 +20,14 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.18"
+private const val PLUGIN_VERSION = "1.2.19"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
 private const val ACTION_BUTTON_SIZE = 32
 private const val ACTION_BUTTON_GAP = 8
 private const val DATA_ROW_HEIGHT = 54
-private const val DIVIDER_ROW_HEIGHT = 12
+private const val DIVIDER_ROW_HEIGHT = 6
 
 class UninstallDialog(
     project: Project,
@@ -73,6 +73,19 @@ class UninstallDialog(
         tableModel = UninstallTableModel()
         tableModel.addTableModelListener { updateSummary() }
         table = object : JBTable(tableModel) {
+            override fun paintComponent(g: Graphics) {
+                super.paintComponent(g)
+                val lineColor = UIManager.getColor("Separator.foreground") ?: UIManager.getColor("Component.borderColor") ?: Color.GRAY
+                g.color = lineColor
+                tableModel.rows.forEachIndexed { index, row ->
+                    if (row is TableRow.Divider) {
+                        val rect = getCellRect(index, 0, true)
+                        val y = rect.y + rect.height / 2
+                        g.drawLine(0, y, width, y)
+                    }
+                }
+            }
+
             override fun getToolTipText(e: MouseEvent): String? {
                 val row = rowAtPoint(e.point)
                 val col = columnAtPoint(e.point)
@@ -628,15 +641,9 @@ class UninstallDialog(
         }
 
         private fun dividerCell(tbl: JTable, col: Int): Component =
-            JPanel(BorderLayout()).apply {
+            JPanel().apply {
                 background = tbl.background
                 isOpaque = true
-                if (col == UninstallTableModel.COL_APP) {
-                    add(JSeparator().apply {
-                        foreground = UIManager.getColor("Separator.foreground")
-                    }, BorderLayout.CENTER)
-                    border = JBUI.Borders.empty(5, 10, 5, 16)
-                }
             }
 
         private fun dataCell(
