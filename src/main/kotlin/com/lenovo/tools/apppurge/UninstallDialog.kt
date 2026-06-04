@@ -20,7 +20,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.20"
+private const val PLUGIN_VERSION = "1.2.21"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -83,7 +83,7 @@ class UninstallDialog(
                     if (row is TableRow.Divider) {
                         val rect = getCellRect(index, 0, true)
                         val y = rect.y + rect.height / 2
-                        g.drawLine(DIVIDER_LINE_INSET, y, width - DIVIDER_LINE_INSET, y)
+                        g.drawLine(DIVIDER_LINE_INSET, y, dividerLineEndX(), y)
                     }
                 }
             }
@@ -108,10 +108,11 @@ class UninstallDialog(
             rowHeight = DATA_ROW_HEIGHT
             columnModel.getColumn(UninstallTableModel.COL_CHECK).apply { maxWidth = 54; minWidth = 54 }
             columnModel.getColumn(UninstallTableModel.COL_APP).preferredWidth = 400
-            columnModel.getColumn(UninstallTableModel.COL_STATUS).preferredWidth = 300
-            columnModel.getColumn(UninstallTableModel.COL_ACTION).apply { maxWidth = 192; minWidth = 192 }
+            columnModel.getColumn(UninstallTableModel.COL_STATUS).preferredWidth = 220
+            columnModel.getColumn(UninstallTableModel.COL_ACTION).apply { maxWidth = 240; minWidth = 240 }
             val renderer = UniversalRenderer()
             for (i in 0 until columnCount) columnModel.getColumn(i).cellRenderer = renderer
+            tableHeader.defaultRenderer = CenterHeaderRenderer(tableHeader.defaultRenderer)
 
             addMouseListener(object : MouseAdapter() {
                 override fun mousePressed(e: MouseEvent) {
@@ -405,14 +406,13 @@ class UninstallDialog(
             ) != Messages.OK) return
         if (!clearingPackages.add(info.packageName)) return
         refreshActionRendering()
-        setStatus("Clearing data for ${info.packageName}…")
         Thread {
             val result = AdbService.clearAppData(serial, info.packageName, adbPath)
             SwingUtilities.invokeLater {
                 clearingPackages.remove(info.packageName)
                 refreshActionRendering()
                 if (result.success) {
-                    setStatus("Cleared data: ${info.packageName}")
+                    setStatus("")
                 } else {
                     setStatus("Clear data failed: ${info.packageName}")
                     Messages.showErrorDialog(commandFailureMessage("Failed to clear app data.", result.output), "AppPurge Clear Data Failed")
@@ -429,7 +429,6 @@ class UninstallDialog(
             ) != Messages.OK) return
         if (!uninstallingPackages.add(info.packageName)) return
         refreshActionRendering()
-        setStatus("Uninstalling ${info.packageName}…")
         Thread {
             val result = AdbService.uninstallPackage(serial, info.packageName, adbPath)
             SwingUtilities.invokeLater {
@@ -442,7 +441,7 @@ class UninstallDialog(
                         tableModel.removeDeviceItem(info.packageName)
                         updateRowHeights()
                     }
-                    setStatus("Uninstalled ${info.packageName}")
+                    setStatus("")
                 } else {
                     setStatus("Uninstall failed: ${info.packageName}")
                     Messages.showErrorDialog(commandFailureMessage("Failed to uninstall app.", result.output), "AppPurge Uninstall Failed")
@@ -454,7 +453,6 @@ class UninstallDialog(
     private fun onReinstall(serial: String, info: AppInstallInfo, apk: File) {
         if (!reinstallingPackages.add(info.packageName)) return
         refreshActionRendering()
-        setStatus("Installing ${info.packageName}…")
         Thread {
             val result = AdbService.installApk(serial, apk.absolutePath, adbPath)
             val installed = if (result.success) {
@@ -472,7 +470,7 @@ class UninstallDialog(
                 refreshActionRendering()
                 if (installed) {
                     tableModel.updateRow(info.packageName, InstallStatus.INSTALLED, installTimeMs)
-                    setStatus("Installed ${info.packageName}")
+                    setStatus("")
                 } else {
                     setStatus("Install failed: ${info.packageName}")
                     Messages.showErrorDialog(
@@ -503,21 +501,36 @@ class UninstallDialog(
         uninstallBtn.isEnabled = !loading && selected > 0
     }
 
+    private fun dividerLineEndX(): Int {
+        if (!this::table.isInitialized) return 0
+        val actionColumnRect = table.getCellRect(0, UninstallTableModel.COL_ACTION, true)
+        val totalWidth = actionGroupWidth(RowAction.entries)
+        val startX = actionColumnRect.x + ((actionColumnRect.width - totalWidth) / 2).coerceAtLeast(0)
+        return (startX + totalWidth).coerceAtMost(table.width - DIVIDER_LINE_INSET)
+    }
+
     private fun actionAt(row: Int, x: Int): RowAction? {
         val info = (tableModel.rows.getOrNull(row) as? TableRow.Data)?.info ?: return null
         val cell = table.getCellRect(row, UninstallTableModel.COL_ACTION, true)
         val localX = x - cell.x
-        val totalWidth = RowAction.entries.size * ACTION_BUTTON_SIZE + (RowAction.entries.size - 1) * ACTION_BUTTON_GAP
+        val actions = actionsFor(info)
+        val totalWidth = actionGroupWidth(actions)
         val startX = ((cell.width - totalWidth) / 2).coerceAtLeast(0)
         if (localX < startX || localX >= startX + totalWidth) return null
         val offset = localX - startX
         val stride = ACTION_BUTTON_SIZE + ACTION_BUTTON_GAP
         val idx = offset / stride
         if (offset % stride >= ACTION_BUTTON_SIZE) return null
-        if (idx !in RowAction.entries.indices) return null
-        val action = RowAction.entries[idx]
+        if (idx !in actions.indices) return null
+        val action = actions[idx]
         return action.takeIf { isActionEnabled(it, info) }
     }
+
+    private fun actionsFor(info: AppInstallInfo): List<RowAction> =
+        if (info.isFromProject) RowAction.entries else listOf(RowAction.CLEAR, RowAction.UNINSTALL)
+
+    private fun actionGroupWidth(actions: List<RowAction>): Int =
+        actions.size * ACTION_BUTTON_SIZE + (actions.size - 1).coerceAtLeast(0) * ACTION_BUTTON_GAP
 
     private fun activeAction(info: AppInstallInfo): RowAction? = when (info.packageName) {
         in reinstallingPackages -> RowAction.REINSTALL
@@ -618,7 +631,7 @@ class UninstallDialog(
             model.isRollover = false
         }
         private val actionPanel = JPanel(GridBagLayout()).apply { isOpaque = true }
-        private val actionButtons = RowAction.entries.map { action ->
+        private val actionButtonByType = RowAction.entries.associateWith { action ->
             JButton().apply {
                 icon = action.enabledIcon
                 disabledIcon = action.disabledIcon
@@ -665,16 +678,16 @@ class UninstallDialog(
                     removeAll()
                     background = rowBackground(tbl, row, r)
                     val activeAction = activeAction(r.info)
-                    RowAction.entries.forEachIndexed { index, action ->
+                    actionsFor(r.info).forEachIndexed { index, action ->
                         val enabled = isActionEnabled(action, r.info)
-                        actionButtons[index].apply {
+                        val button = actionButtonByType.getValue(action).apply {
                             isEnabled = enabled
                             icon = if (activeAction == action) spinnerIcon else action.enabledIcon
                             disabledIcon = if (activeAction == action) spinnerIcon else action.disabledIcon
                             toolTipText = if (activeAction == action) action.loadingTooltip else action.tooltip(r.info)
                             background = actionPanel.background
                         }
-                        add(actionButtons[index], GridBagConstraints().apply {
+                        add(button, GridBagConstraints().apply {
                             gridx = index
                             insets = Insets(0, if (index == 0) 0 else ACTION_BUTTON_GAP, 0, 0)
                         })
@@ -718,6 +731,21 @@ class UninstallDialog(
                     font = Font(Font.MONOSPACED, Font.PLAIN, 12)
                 })
             }
+    }
+
+    private class CenterHeaderRenderer(private val delegate: TableCellRenderer) : TableCellRenderer {
+        override fun getTableCellRendererComponent(
+            table: JTable,
+            value: Any?,
+            isSelected: Boolean,
+            hasFocus: Boolean,
+            row: Int,
+            column: Int,
+        ): Component {
+            val c = delegate.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
+            (c as? JLabel)?.horizontalAlignment = SwingConstants.CENTER
+            return c
+        }
     }
 }
 
