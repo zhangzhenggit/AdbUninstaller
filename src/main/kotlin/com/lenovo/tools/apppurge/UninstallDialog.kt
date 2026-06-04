@@ -20,12 +20,12 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.22"
+private const val PLUGIN_VERSION = "1.2.23"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
-private const val ACTION_BUTTON_SIZE = 32
-private const val ACTION_BUTTON_GAP = 8
+private const val ACTION_BUTTON_SIZE = 38
+private const val ACTION_BUTTON_GAP = 12
 private const val DATA_ROW_HEIGHT = 54
 private const val DIVIDER_ROW_HEIGHT = 6
 private const val DIVIDER_LINE_INSET = 18
@@ -107,9 +107,9 @@ class UninstallDialog(
             intercellSpacing = Dimension(1, 1)
             rowHeight = DATA_ROW_HEIGHT
             columnModel.getColumn(UninstallTableModel.COL_CHECK).apply { maxWidth = 54; minWidth = 54 }
-            columnModel.getColumn(UninstallTableModel.COL_APP).preferredWidth = 400
-            columnModel.getColumn(UninstallTableModel.COL_STATUS).preferredWidth = 220
-            columnModel.getColumn(UninstallTableModel.COL_ACTION).apply { maxWidth = 240; minWidth = 240 }
+            columnModel.getColumn(UninstallTableModel.COL_APP).preferredWidth = 360
+            columnModel.getColumn(UninstallTableModel.COL_STATUS).preferredWidth = 150
+            columnModel.getColumn(UninstallTableModel.COL_ACTION).apply { maxWidth = 320; minWidth = 320 }
             val renderer = UniversalRenderer()
             for (i in 0 until columnCount) columnModel.getColumn(i).cellRenderer = renderer
             tableHeader.defaultRenderer = CenterHeaderRenderer(tableHeader.defaultRenderer)
