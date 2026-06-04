@@ -20,7 +20,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.21"
+private const val PLUGIN_VERSION = "1.2.22"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -515,7 +515,9 @@ class UninstallDialog(
         val localX = x - cell.x
         val actions = actionsFor(info)
         val totalWidth = actionGroupWidth(actions)
-        val startX = ((cell.width - totalWidth) / 2).coerceAtLeast(0)
+        val fullWidth = actionGroupWidth(RowAction.entries)
+        val fullStartX = ((cell.width - fullWidth) / 2).coerceAtLeast(0)
+        val startX = fullStartX + fullWidth - totalWidth
         if (localX < startX || localX >= startX + totalWidth) return null
         val offset = localX - startX
         val stride = ACTION_BUTTON_SIZE + ACTION_BUTTON_GAP
@@ -678,6 +680,9 @@ class UninstallDialog(
                     removeAll()
                     background = rowBackground(tbl, row, r)
                     val activeAction = activeAction(r.info)
+                    add(Box.createHorizontalStrut(actionGroupWidth(RowAction.entries) - actionGroupWidth(actionsFor(r.info))), GridBagConstraints().apply {
+                        gridx = 0
+                    })
                     actionsFor(r.info).forEachIndexed { index, action ->
                         val enabled = isActionEnabled(action, r.info)
                         val button = actionButtonByType.getValue(action).apply {
@@ -688,7 +693,7 @@ class UninstallDialog(
                             background = actionPanel.background
                         }
                         add(button, GridBagConstraints().apply {
-                            gridx = index
+                            gridx = index + 1
                             insets = Insets(0, if (index == 0) 0 else ACTION_BUTTON_GAP, 0, 0)
                         })
                     }
@@ -698,7 +703,16 @@ class UninstallDialog(
             else -> {
                 val c = textRenderer.getTableCellRendererComponent(tbl, value, false, false, row, col)
                 c.background = rowBackground(tbl, row, r)
-                (c as? JLabel)?.border = JBUI.Borders.emptyLeft(16)
+                (c as? JLabel)?.border = if (col == UninstallTableModel.COL_STATUS) {
+                    JBUI.Borders.empty()
+                } else {
+                    JBUI.Borders.emptyLeft(16)
+                }
+                (c as? JLabel)?.horizontalAlignment = if (col == UninstallTableModel.COL_STATUS) {
+                    SwingConstants.CENTER
+                } else {
+                    SwingConstants.LEFT
+                }
                 (c as? JLabel)?.foreground = when (r.info.status) {
                     InstallStatus.INSTALLED -> Color(0x82, 0xCC, 0x8D)
                     else -> UIManager.getColor("Label.disabledForeground") ?: Color(0x9A, 0x9D, 0xA4)
