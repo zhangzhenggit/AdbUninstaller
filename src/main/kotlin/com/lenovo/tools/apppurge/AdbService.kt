@@ -94,7 +94,7 @@ object AdbService {
     }
 
     fun installApk(serial: String, apkPath: String, adb: String): CommandResult {
-        val output = exec(listOf(adb, "-s", serial, "install", "-r", apkPath), timeoutSec = 60)
+        val output = exec(listOf(adb, "-s", serial, "install", "-r", "-t", apkPath), timeoutSec = 60)
         return CommandResult(output.contains("Success", ignoreCase = true), output.trim())
     }
 

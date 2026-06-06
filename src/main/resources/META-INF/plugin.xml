@@ -22,7 +22,10 @@
                 text="AppPurge"
                 description="Scan app modules and uninstall APKs from connected device via ADB"
                 icon="/icons/apppurge.svg">
-            <!-- New UI (Android Studio Panda / IntelliJ 2023.3+) toolbar center area -->
+            <!-- New UI run toolbar when the IDE exposes the run toolbar action group. -->
+            <add-to-group group-id="RunToolbarActionsGroup" anchor="before" relative-to-action="RunToolbarMoreActionGroup"/>
+            <add-to-group group-id="RunToolbarMainActionsGroup" anchor="before" relative-to-action="RunToolbarMainMoreActionGroup"/>
+            <!-- Reliable New UI fallback: keep the action visible in the center toolbar. -->
             <add-to-group group-id="MainToolbarCenter" anchor="last"/>
             <!-- Classic toolbar fallback -->
             <add-to-group group-id="MainToolBar" anchor="last"/>
