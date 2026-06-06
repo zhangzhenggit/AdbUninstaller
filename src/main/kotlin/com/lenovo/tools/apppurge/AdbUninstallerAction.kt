@@ -26,11 +26,8 @@ class AdbUninstallerAction : AnAction(
         val project = e.project ?: return
         val basePath = project.basePath
 
-        ProgressManager.getInstance().run(object : Task.Modal(project, "AppPurge: Scanning…", false) {
+        ProgressManager.getInstance().run(object : Task.Modal(project, "AppPurge: Connecting…", false) {
             override fun run(indicator: ProgressIndicator) {
-                indicator.text = "Scanning app modules…"
-                val appInfos = AppModuleScanner.scan(project)
-
                 indicator.text = "Connecting to ADB…"
                 val adb = AdbService.adbPath(basePath)
                 val serials = AdbService.getConnectedDevices(basePath)
@@ -40,15 +37,15 @@ class AdbUninstallerAction : AnAction(
                 }
 
                 ApplicationManager.getApplication().invokeLater {
-                    if (appInfos.isEmpty() && serials.isEmpty()) {
+                    if (serials.isEmpty()) {
                         Messages.showInfoMessage(
                             project,
-                            "No app modules found and no ADB device connected.",
+                            "No ADB device connected.",
                             "AppPurge",
                         )
                         return@invokeLater
                     }
-                    UninstallDialog(project, appInfos, deviceNames, basePath).show()
+                    UninstallDialog(project, emptyList(), deviceNames, basePath).show()
                 }
             }
         })

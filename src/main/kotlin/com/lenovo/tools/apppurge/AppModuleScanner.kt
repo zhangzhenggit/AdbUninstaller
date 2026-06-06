@@ -1,6 +1,7 @@
 package com.lenovo.tools.apppurge
 
 import com.android.tools.idea.model.AndroidModel
+import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.project.Project
@@ -12,6 +13,13 @@ import javax.xml.parsers.DocumentBuilderFactory
 object AppModuleScanner {
 
     fun scan(project: Project): List<AppInstallInfo> {
+        if (project.isDisposed) return emptyList()
+        return ReadAction.compute<List<AppInstallInfo>, RuntimeException> {
+            scanModules(project)
+        }
+    }
+
+    private fun scanModules(project: Project): List<AppInstallInfo> {
         return ModuleManager.getInstance(project).modules
             .filter { !it.isDisposed && !isTestModule(it) && isAppModule(it) }
             .mapNotNull { module ->

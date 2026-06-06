@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.lenovo.tools.apppurge</id>
     <name>AppPurge</name>
-    <vendor>Lenovo</vendor>
+    <vendor>zheng</vendor>
 
     <description><![CDATA[
     Scans all application modules in the current Android project, detects their installation

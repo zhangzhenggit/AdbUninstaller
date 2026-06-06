@@ -50,7 +50,7 @@ sdk.dir=C:\\Users\\xxx\\AppData\\Local\\Android\\Sdk
 
 ## 版本号管理
 
-修改插件版本号时，需要同步更新两处：
+只要需要执行 `.\gradlew.bat buildPlugin` 生成交付测试包或发布包，就必须先递增 patch 版本号，并同步更新两处：
 
 - `gradle.properties` 中的 `pluginVersion`
 - `src/main/kotlin/com/lenovo/tools/apppurge/UninstallDialog.kt` 中的 `PLUGIN_VERSION` 常量
@@ -61,3 +61,4 @@ sdk.dir=C:\\Users\\xxx\\AppData\\Local\\Android\\Sdk
 - `UninstallDialog` 包含主要 UI、事件处理和表格渲染逻辑，修改渲染或点击区域时需要同时检查视觉反馈和点击判定。
 - `UninstallTableModel` 将工程模块应用和仅设备安装应用分区展示，中间使用 Divider 行分隔。
 - 所有 ADB 调用应保持在后台线程执行，UI 更新回到 EDT。
+- 每次完整修改后，应先运行可行的验证命令；验证通过且需要交付测试时，必须先按“版本号管理”递增版本号，再执行 `.\gradlew.bat buildPlugin` 编译出插件包。

@@ -21,7 +21,7 @@ import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.36"
+private const val PLUGIN_VERSION = "1.2.39"
 private const val TOGGLE_DEFAULT = "Show all user-installed on device"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -30,6 +30,8 @@ private const val ACTION_BUTTON_GAP = 18
 private const val DATA_ROW_HEIGHT = 54
 private const val DIVIDER_ROW_HEIGHT = 6
 private const val DIVIDER_LINE_INSET = 18
+private const val PROJECT_SCAN_MAX_ATTEMPTS = 20
+private const val PROJECT_SCAN_RETRY_DELAY_MS = 1500L
 
 class UninstallDialog(
     private val project: Project,
@@ -56,6 +58,7 @@ class UninstallDialog(
     private val uninstallingPackages = mutableSetOf<String>()
     private var actionSpinnerTimer: Timer? = null
     private var pressedAction: RowActionTarget? = null
+    private var copyStatusTimer: Timer? = null
     private val nameResolveRunId = AtomicInteger(0)
     private val uninstallBtn = JButton("Uninstall Selected").apply {
         foreground = Color(0xD3, 0x56, 0x5C)
@@ -67,9 +70,9 @@ class UninstallDialog(
     }
 
     init {
-        title = "AppPurge — APK Manager"
+        title = "APK Manager"
         init()
-        if (serials.isNotEmpty()) loadInstallStatus(serials[0], showAll = false)
+        if (serials.isNotEmpty()) loadInstallStatus(serials[0], showAll = false, rescanProject = true)
     }
 
     override fun createCenterPanel(): JComponent {
@@ -300,7 +303,7 @@ class UninstallDialog(
 
         Thread {
             try {
-                val projectInfos = if (rescanProject) AppModuleScanner.scan(project) else projectAppInfos
+                val projectInfos = if (rescanProject) scanProjectModulesWithRetry() else projectAppInfos
                 projectAppInfos = projectInfos
 
                 val installedPkgs = AdbService.getAllInstalledPackages(serial, adbPath)
@@ -321,6 +324,7 @@ class UninstallDialog(
                 projectInfos.forEach { info ->
                     if (info.module != null) info.apkFiles = ApkFinder.findApks(info.module)
                 }
+                val projectLoadStatus = projectLoadStatus(projectInfos)
 
                 if (showAll) {
                     val projectPkgs = projectInfos.map { it.packageName }.toSet()
@@ -353,7 +357,12 @@ class UninstallDialog(
                     SwingUtilities.invokeLater {
                         if (runId == nameResolveRunId.get()) {
                             setNameResolving(false)
-                            setStatus("Project Apps: ${projectInfos.size} · Installed Apps: ${userPkgs.size}")
+                            setStatus(
+                                buildString {
+                                    append("Project Apps: ${projectInfos.size} · Installed Apps: ${userPkgs.size}")
+                                    if (projectLoadStatus.isNotBlank()) append(" · ").append(projectLoadStatus)
+                                }
+                            )
                         }
                     }
                 } else {
@@ -361,7 +370,7 @@ class UninstallDialog(
                         tableModel.resetItems(projectInfos)
                         updateRowHeights()
                         setLoading(false)
-                        setStatus("")
+                        setStatus(projectLoadStatus)
                     }
                 }
             } catch (e: Exception) {
@@ -372,6 +381,28 @@ class UninstallDialog(
                 }
             }
         }.also { it.isDaemon = true; it.name = "AppPurge-ADB" }.start()
+    }
+
+    private fun scanProjectModulesWithRetry(): List<AppInstallInfo> {
+        repeat(PROJECT_SCAN_MAX_ATTEMPTS) { index ->
+            val infos = AppModuleScanner.scan(project)
+            if (infos.isNotEmpty()) return infos
+
+            val attempt = index + 1
+            SwingUtilities.invokeLater {
+                setStatus("Waiting for Android application modules to load… $attempt / $PROJECT_SCAN_MAX_ATTEMPTS")
+            }
+            if (attempt < PROJECT_SCAN_MAX_ATTEMPTS) {
+                Thread.sleep(PROJECT_SCAN_RETRY_DELAY_MS)
+            }
+        }
+        return emptyList()
+    }
+
+    private fun projectLoadStatus(projectInfos: List<AppInstallInfo>): String = when {
+        projectInfos.isEmpty() -> "No Android application modules found. Project model may still be loading; try Refresh after Gradle sync finishes."
+        projectInfos.all { it.apkFiles.isEmpty() } -> "Application modules found, but no APK files found. Build the module first."
+        else -> ""
     }
 
     private fun onBatchUninstall() {
@@ -523,7 +554,17 @@ class UninstallDialog(
 
     private fun copyPackageName(info: AppInstallInfo) {
         Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(info.packageName), null)
+        copyStatusTimer?.stop()
+        val normalColor = UIManager.getColor("Label.disabledForeground")
+        statusLabel.foreground = Color(0x64, 0xB5, 0xF6)
         setStatus("Copied package: ${info.packageName}")
+        copyStatusTimer = Timer(1800) {
+            statusLabel.foreground = normalColor
+            setStatus("")
+        }.apply {
+            isRepeats = false
+            start()
+        }
     }
 
     private fun updateSummary() {
@@ -636,7 +677,7 @@ class UninstallDialog(
         val apkText = if (info.apkFiles.isEmpty()) {
             "No APK found"
         } else {
-            info.apkFiles.joinToString("<br>") { htmlEscape(apkLabel(it)) }
+            info.apkFiles.joinToString("<br>") { htmlEscape(apkLabelWithoutTime(it)) }
         }
         return """
             <html>
@@ -702,6 +743,11 @@ class UninstallDialog(
         val folder = f.parentFile?.name ?: ""
         val time = SimpleDateFormat("MM-dd HH:mm").format(Date(f.lastModified()))
         return "${f.name}  [$folder]  $time"
+    }
+
+    private fun apkLabelWithoutTime(f: File): String {
+        val folder = f.parentFile?.name ?: ""
+        return "${f.name}  [$folder]"
     }
 
     // ── Renderer ──────────────────────────────────────────────────────────────
