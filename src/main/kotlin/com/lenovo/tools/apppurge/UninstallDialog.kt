@@ -10,6 +10,7 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.table.JBTable
 import com.intellij.util.ui.JBUI
 import java.awt.*
+import java.awt.datatransfer.StringSelection
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.io.File
@@ -141,6 +142,7 @@ class UninstallDialog(
                     val tableRow = tableModel.rows.getOrNull(row) as? TableRow.Data ?: return
                     when (col) {
                         UninstallTableModel.COL_CHECK -> return
+                        UninstallTableModel.COL_APP -> copyPackageName(tableRow.info)
                         UninstallTableModel.COL_ACTION -> {
                             val action = actionAt(row, e.point.x) ?: return
                             setPressedAction(RowActionTarget(row, tableRow.info.packageName, action))
@@ -517,6 +519,11 @@ class UninstallDialog(
     private fun setStatus(text: String) {
         statusLabel.text = text
         updateSummary()
+    }
+
+    private fun copyPackageName(info: AppInstallInfo) {
+        Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(info.packageName), null)
+        setStatus("Copied package: ${info.packageName}")
     }
 
     private fun updateSummary() {
