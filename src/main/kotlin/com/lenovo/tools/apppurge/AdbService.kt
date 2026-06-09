@@ -51,6 +51,55 @@ object AdbService {
         return if (model.isNotBlank()) "$model ($serial)" else serial
     }
 
+    data class PackageSnapshot(
+        val currentUser: String,
+        val installedPackages: Set<String>,
+        val userPackages: Set<String>,
+        val systemPackages: Set<String>,
+    ) {
+        val isEmpty: Boolean
+            get() = installedPackages.isEmpty() && userPackages.isEmpty() && systemPackages.isEmpty()
+    }
+
+    fun getPackageSnapshot(serial: String, adb: String): PackageSnapshot {
+        val currentUser = getCurrentUser(serial, adb)
+        return PackageSnapshot(
+            currentUser = currentUser,
+            installedPackages = getInstalledPackagesForUser(serial, adb, currentUser),
+            userPackages = getUserPackagesForUser(serial, adb, currentUser),
+            systemPackages = getSystemPackagesForUser(serial, adb, currentUser),
+        )
+    }
+
+    fun getInstalledPackagesForUser(serial: String, adb: String, user: String = getCurrentUser(serial, adb)): Set<String> =
+        listPackagesForUser(serial, adb, user, emptyList())
+            .ifEmpty { getAllInstalledPackages(serial, adb) }
+
+    fun getSystemPackagesForUser(serial: String, adb: String, user: String = getCurrentUser(serial, adb)): Set<String> =
+        listPackagesForUser(serial, adb, user, listOf("-s"))
+            .ifEmpty { getAllSystemPackages(serial, adb) }
+
+    fun getPackageState(serial: String, packageName: String, adb: String): InstallStatus {
+        val currentUser = getCurrentUser(serial, adb)
+        val installedPackages = getInstalledPackagesForUser(serial, adb, currentUser)
+        val systemPackages = getSystemPackagesForUser(serial, adb, currentUser)
+        return queryProjectPackageStatus(serial, packageName, installedPackages, systemPackages, adb)
+    }
+
+    fun queryProjectPackageStatus(
+        serial: String,
+        packageName: String,
+        installedPackages: Set<String>,
+        systemPackages: Set<String>,
+        adb: String,
+    ): InstallStatus {
+        if (packageName !in installedPackages) return InstallStatus.NOT_INSTALLED
+        if (packageName !in systemPackages) return InstallStatus.USER_APP
+
+        val paths = getPackagePaths(serial, packageName, adb)
+        return if (paths.any(::isDataAppPath)) InstallStatus.UPDATED_SYSTEM_APP else InstallStatus.SYSTEM_APP
+    }
+
     // Returns ALL installed package names in one shot
     fun getAllInstalledPackages(serial: String, adb: String): Set<String> =
         parsePackageList(shell(serial, "pm list packages", adb))
@@ -110,6 +159,46 @@ object AdbService {
             .map { it.removePrefix("package:").trim() }
             .filter { it.isNotBlank() }
     }
+
+    fun getCurrentUser(serial: String, adb: String): String {
+        val cmdUser = shell(serial, "cmd activity get-current-user", adb).trim()
+        if (cmdUser.isNotBlank() && cmdUser.all(Char::isDigit)) return cmdUser
+        val amUser = shell(serial, "am get-current-user", adb).trim()
+        if (amUser.isNotBlank() && amUser.all(Char::isDigit)) return amUser
+        return "0"
+    }
+
+    private fun getUserPackagesForUser(serial: String, adb: String, user: String): Set<String> =
+        listPackagesForUser(serial, adb, user, listOf("-3"))
+            .ifEmpty { getAllUserPackages(serial, adb).toSet() }
+
+    private fun listPackagesForUser(serial: String, adb: String, user: String, flags: List<String>): Set<String> {
+        val cmdOutput = shell(serial, packageListCommand("cmd package list packages", user, flags), adb)
+        val cmdPackages = parsePackageList(cmdOutput)
+        if (cmdPackages.isNotEmpty() || cmdOutput.isBlank()) return cmdPackages
+
+        val pmOutput = shell(serial, packageListCommand("pm list packages", user, flags), adb)
+        val pmPackages = parsePackageList(pmOutput)
+        if (pmPackages.isNotEmpty() || pmOutput.isBlank()) return pmPackages
+
+        return emptySet()
+    }
+
+    private fun packageListCommand(base: String, user: String, flags: List<String>): String =
+        listOf(base, flags.joinToString(" "), "--user $user")
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+
+    private fun getPackagePaths(serial: String, packageName: String, adb: String): List<String> =
+        shell(serial, "pm path $packageName", adb)
+            .lineSequence()
+            .filter { it.startsWith("package:") }
+            .map { it.removePrefix("package:").trim() }
+            .filter { it.isNotBlank() }
+            .toList()
+
+    private fun isDataAppPath(path: String): Boolean =
+        path.startsWith("/data/app/")
 
     private fun parsePackageList(output: String): Set<String> =
         output.lines()
@@ -218,8 +307,12 @@ object AdbService {
         reader.isDaemon = true
         reader.start()
         val finished = process.waitFor(timeoutSec, TimeUnit.SECONDS)
-        if (!finished) process.destroyForcibly()
-        reader.join(2000)
+        if (!finished) {
+            process.destroyForcibly()
+            reader.join(2000)
+        } else {
+            reader.join(timeoutSec * 500)
+        }
         sb.toString()
     }.getOrDefault("")
 }

@@ -16,19 +16,26 @@ import java.awt.event.MouseEvent
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.EventObject
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.*
 import javax.swing.table.DefaultTableCellRenderer
+import javax.swing.table.JTableHeader
+import javax.swing.table.TableCellEditor
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.39"
-private const val TOGGLE_DEFAULT = "Show all user-installed on device"
+private const val PLUGIN_VERSION = "1.2.45"
+private const val TOGGLE_DEFAULT = "Show All Installed Apps"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
 private const val ACTION_BUTTON_SIZE = 38
-private const val ACTION_BUTTON_GAP = 18
 private const val DATA_ROW_HEIGHT = 54
 private const val DIVIDER_ROW_HEIGHT = 6
+private val ACTION_COLS = setOf(
+    UninstallTableModel.COL_REINSTALL,
+    UninstallTableModel.COL_CLEAR,
+    UninstallTableModel.COL_UNINSTALL,
+)
 private const val DIVIDER_LINE_INSET = 18
 private const val PROJECT_SCAN_MAX_ATTEMPTS = 20
 private const val PROJECT_SCAN_RETRY_DELAY_MS = 1500L
@@ -57,8 +64,9 @@ class UninstallDialog(
     private val clearingPackages = mutableSetOf<String>()
     private val uninstallingPackages = mutableSetOf<String>()
     private var actionSpinnerTimer: Timer? = null
-    private var pressedAction: RowActionTarget? = null
     private var copyStatusTimer: Timer? = null
+    private var pressedActionRow = -1
+    private var pressedActionCol = -1
     private val nameResolveRunId = AtomicInteger(0)
     private val uninstallBtn = JButton("Uninstall Selected").apply {
         foreground = Color(0xD3, 0x56, 0x5C)
@@ -68,6 +76,8 @@ class UninstallDialog(
         margin = Insets(0, 8, 0, 8)
         addActionListener { cancelNameResolving("Name resolving stopped") }
     }
+    private var cachedSnapshot: AdbService.PackageSnapshot? = null
+    private var cachedSnapshotSerial: String? = null
 
     init {
         title = "APK Manager"
@@ -91,34 +101,17 @@ class UninstallDialog(
                         g.drawLine(DIVIDER_LINE_INSET, y, dividerLineEndX(), y)
                     }
                 }
-                // Draw pressed button highlight AFTER super (covers JBTable hover overlay)
-                val pressed = pressedAction ?: return
-                val rowData = tableModel.rows.getOrNull(pressed.row) as? TableRow.Data ?: return
-                val actions = actionsFor(rowData.info)
-                val idx = actions.indexOf(pressed.action)
-                if (idx < 0) return
-                val cell = getCellRect(pressed.row, UninstallTableModel.COL_ACTION, true)
-                val totalWidth = actionGroupWidth(actions)
-                val fullWidth = actionGroupWidth(RowAction.entries)
-                val bx = cell.x + ((cell.width - fullWidth) / 2).coerceAtLeast(0) + fullWidth - totalWidth + idx * (ACTION_BUTTON_SIZE + ACTION_BUTTON_GAP)
-                val by = cell.y + (cell.height - ACTION_BUTTON_SIZE) / 2
-                val g2 = g.create() as Graphics2D
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                g2.color = actionPressedBackground(background)
-                g2.fillRoundRect(bx, by, ACTION_BUTTON_SIZE, ACTION_BUTTON_SIZE, 6, 6)
-                val icon = pressed.action.enabledIcon
-                icon.paintIcon(this, g2, bx + (ACTION_BUTTON_SIZE - icon.iconWidth) / 2, by + (ACTION_BUTTON_SIZE - icon.iconHeight) / 2)
-                g2.dispose()
             }
 
             override fun getToolTipText(e: MouseEvent): String? {
                 val row = rowAtPoint(e.point)
                 val col = columnAtPoint(e.point)
                 val data = tableModel.rows.getOrNull(row) as? TableRow.Data ?: return null
-                return if (col == UninstallTableModel.COL_ACTION) {
-                    actionAt(row, e.point.x)?.let { actionTooltip(it, data.info) }
-                } else {
-                    appTooltip(data.info)
+                return when (col) {
+                    UninstallTableModel.COL_REINSTALL -> actionTooltip(RowAction.REINSTALL, data.info)
+                    UninstallTableModel.COL_CLEAR -> actionTooltip(RowAction.CLEAR, data.info)
+                    UninstallTableModel.COL_UNINSTALL -> actionTooltip(RowAction.UNINSTALL, data.info)
+                    else -> appTooltip(data.info)
                 }
             }
         }.apply {
@@ -130,15 +123,58 @@ class UninstallDialog(
             intercellSpacing = Dimension(1, 1)
             rowHeight = DATA_ROW_HEIGHT
             columnModel.getColumn(UninstallTableModel.COL_CHECK).apply { maxWidth = 54; minWidth = 54 }
-            columnModel.getColumn(UninstallTableModel.COL_APP).preferredWidth = 360
-            columnModel.getColumn(UninstallTableModel.COL_STATUS).preferredWidth = 150
-            columnModel.getColumn(UninstallTableModel.COL_ACTION).apply { maxWidth = 320; minWidth = 320 }
-            val renderer = UniversalRenderer()
-            for (i in 0 until columnCount) columnModel.getColumn(i).cellRenderer = renderer
-            tableHeader.defaultRenderer = CenterHeaderRenderer(tableHeader.defaultRenderer)
+            columnModel.getColumn(UninstallTableModel.COL_APP).preferredWidth = 280
+            columnModel.getColumn(UninstallTableModel.COL_STATUS).preferredWidth = 110
+            for (col in listOf(UninstallTableModel.COL_REINSTALL, UninstallTableModel.COL_CLEAR, UninstallTableModel.COL_UNINSTALL)) {
+                columnModel.getColumn(col).apply { maxWidth = 96; minWidth = 96 }
+            }
+
+            val universalRenderer = UniversalRenderer()
+            columnModel.getColumn(UninstallTableModel.COL_CHECK).cellRenderer = universalRenderer
+            columnModel.getColumn(UninstallTableModel.COL_APP).cellRenderer = universalRenderer
+            columnModel.getColumn(UninstallTableModel.COL_STATUS).cellRenderer = universalRenderer
+            columnModel.getColumn(UninstallTableModel.COL_REINSTALL).also {
+                it.cellRenderer = ActionCellRenderer(RowAction.REINSTALL)
+                it.cellEditor = ActionCellEditor(RowAction.REINSTALL)
+            }
+            columnModel.getColumn(UninstallTableModel.COL_CLEAR).also {
+                it.cellRenderer = ActionCellRenderer(RowAction.CLEAR)
+                it.cellEditor = ActionCellEditor(RowAction.CLEAR)
+            }
+            columnModel.getColumn(UninstallTableModel.COL_UNINSTALL).also {
+                it.cellRenderer = ActionCellRenderer(RowAction.UNINSTALL)
+                it.cellEditor = ActionCellEditor(RowAction.UNINSTALL)
+            }
+
+            // Merged "Options" header spanning the three button columns
+            tableHeader = object : JTableHeader(columnModel) {
+                init { defaultRenderer = CenterHeaderRenderer(defaultRenderer) }
+                override fun paintComponent(g: Graphics) {
+                    super.paintComponent(g)
+                    val r1 = getHeaderRect(UninstallTableModel.COL_REINSTALL)
+                    val r3 = getHeaderRect(UninstallTableModel.COL_UNINSTALL)
+                    val x = r1.x; val w = r3.x + r3.width - r1.x
+                    val g2 = g.create() as Graphics2D
+                    g2.color = background
+                    g2.fillRect(x + 1, 1, w - 2, height - 2)
+                    val sep = UIManager.getColor("TableHeader.separatorColor")
+                        ?: UIManager.getColor("Separator.foreground") ?: Color.GRAY
+                    g2.color = sep
+                    g2.drawLine(x, 0, x, height - 1)
+                    g2.drawLine(x + w - 1, 0, x + w - 1, height - 1)
+                    g2.color = foreground
+                    g2.font = font
+                    val fm = g2.fontMetrics
+                    val text = "Options"
+                    g2.drawString(text, x + (w - fm.stringWidth(text)) / 2, (height + fm.ascent - fm.descent) / 2)
+                    g2.dispose()
+                }
+            }
 
             addMouseListener(object : MouseAdapter() {
                 override fun mousePressed(e: MouseEvent) {
+                    pressedActionRow = -1
+                    pressedActionCol = -1
                     clearSelection()
                     val row = rowAtPoint(e.point)
                     val col = columnAtPoint(e.point)
@@ -146,28 +182,34 @@ class UninstallDialog(
                     when (col) {
                         UninstallTableModel.COL_CHECK -> return
                         UninstallTableModel.COL_APP -> copyPackageName(tableRow.info)
-                        UninstallTableModel.COL_ACTION -> {
-                            val action = actionAt(row, e.point.x) ?: return
-                            setPressedAction(RowActionTarget(row, tableRow.info.packageName, action))
+                        in ACTION_COLS -> {
+                            pressedActionRow = row
+                            pressedActionCol = col
                         }
                     }
                 }
 
                 override fun mouseReleased(e: MouseEvent) {
-                    val pressed = pressedAction
-                    setPressedAction(null)
-                    if (pressed == null || actionTargetAt(e) != pressed) return
-                    val info = (tableModel.rows.getOrNull(pressed.row) as? TableRow.Data)?.info ?: return
+                    val savedRow = pressedActionRow
+                    val savedCol = pressedActionCol
+                    pressedActionRow = -1
+                    pressedActionCol = -1
+                    if (savedCol in ACTION_COLS) cellEditor?.cancelCellEditing()
+                    if (savedRow < 0 || savedCol !in ACTION_COLS) return
+                    val releaseRow = rowAtPoint(e.point)
+                    val releaseCol = columnAtPoint(e.point)
+                    if (savedRow != releaseRow || savedCol != releaseCol) return
+                    val info = (tableModel.rows.getOrNull(savedRow) as? TableRow.Data)?.info ?: return
                     val serial = currentSerial() ?: return
-                    when (pressed.action) {
-                        RowAction.REINSTALL -> chooseApkAndReinstall(serial, info)
-                        RowAction.CLEAR -> onClearData(serial, info)
-                        RowAction.UNINSTALL -> onUninstallOne(serial, info)
+                    when (savedCol) {
+                        UninstallTableModel.COL_REINSTALL -> chooseApkAndReinstall(serial, info)
+                        UninstallTableModel.COL_CLEAR -> onClearData(serial, info)
+                        UninstallTableModel.COL_UNINSTALL -> onUninstallOne(serial, info)
                     }
                 }
 
                 override fun mouseExited(e: MouseEvent) {
-                    setPressedAction(null)
+                    if (pressedActionCol in ACTION_COLS) cellEditor?.cancelCellEditing()
                 }
             })
         }
@@ -298,6 +340,30 @@ class UninstallDialog(
 
     private fun loadInstallStatus(serial: String, showAll: Boolean, rescanProject: Boolean = false) {
         cancelNameResolving()
+
+        // Fast path: Show All toggle changed, but same device and project statuses are valid.
+        // Just add/remove the device section without re-querying project modules.
+        val snapshot = cachedSnapshot
+        if (!rescanProject && serial == cachedSnapshotSerial && snapshot != null
+            && projectAppInfos.isNotEmpty() && projectAppInfos.none { it.status == InstallStatus.UNKNOWN }
+        ) {
+            setLoading(true)
+            if (!showAll) {
+                SwingUtilities.invokeLater {
+                    tableModel.resetItems(projectAppInfos)
+                    updateRowHeights()
+                    setLoading(false)
+                    setStatus(projectLoadStatus(projectAppInfos))
+                }
+            } else {
+                setStatus("Fetching all user apps…")
+                Thread { resolveDeviceApps(serial, snapshot, projectAppInfos) }
+                    .also { it.isDaemon = true; it.name = "AppPurge-ADB" }.start()
+            }
+            return
+        }
+
+        // Full load: re-query project module statuses and (optionally) re-scan modules.
         setLoading(true)
         setStatus(if (rescanProject) "Scanning project modules…" else if (showAll) "Fetching all user apps…" else "Querying project modules…")
 
@@ -306,65 +372,46 @@ class UninstallDialog(
                 val projectInfos = if (rescanProject) scanProjectModulesWithRetry() else projectAppInfos
                 projectAppInfos = projectInfos
 
-                val installedPkgs = AdbService.getAllInstalledPackages(serial, adbPath)
-                val systemPkgs = AdbService.getAllSystemPackages(serial, adbPath)
-
-                projectInfos.forEach { info ->
-                    info.status = when {
-                        info.packageName in installedPkgs -> InstallStatus.INSTALLED
-                        info.packageName in systemPkgs -> InstallStatus.SYSTEM_ONLY
-                        else -> InstallStatus.NOT_INSTALLED
-                    }
-                }
-                projectInfos.filter { it.status == InstallStatus.INSTALLED }.forEach { info ->
-                    info.installTimeMs = AdbService.getInstallTime(serial, info.packageName, adbPath)
+                projectInfos.forEach { info -> info.status = InstallStatus.UNKNOWN }
+                SwingUtilities.invokeAndWait {
+                    tableModel.resetItems(projectInfos)
+                    updateRowHeights()
                 }
 
-                // Scan build APKs for project modules
                 projectInfos.forEach { info ->
                     if (info.module != null) info.apkFiles = ApkFinder.findApks(info.module)
                 }
                 val projectLoadStatus = projectLoadStatus(projectInfos)
+                val freshSnapshot = AdbService.getPackageSnapshot(serial, adbPath)
+                if (freshSnapshot.isEmpty) {
+                    SwingUtilities.invokeLater {
+                        setNameResolving(false)
+                        setStatus("ADB query failed — check device connection")
+                        setLoading(false)
+                    }
+                    return@Thread
+                }
+                cachedSnapshot = freshSnapshot
+                cachedSnapshotSerial = serial
+
+                projectInfos.forEach { info ->
+                    info.status = AdbService.queryProjectPackageStatus(
+                        serial = serial,
+                        packageName = info.packageName,
+                        installedPackages = freshSnapshot.installedPackages,
+                        systemPackages = freshSnapshot.systemPackages,
+                        adb = adbPath,
+                    )
+                    if (info.isInstalled) {
+                        info.installTimeMs = AdbService.getInstallTime(serial, info.packageName, adbPath)
+                    } else {
+                        info.installTimeMs = 0L
+                    }
+                    SwingUtilities.invokeLater { tableModel.notifyRowChanged(info.packageName) }
+                }
 
                 if (showAll) {
-                    val projectPkgs = projectInfos.map { it.packageName }.toSet()
-                    val userPkgs = (installedPkgs - systemPkgs - projectPkgs).sorted()
-                    val deviceItems = userPkgs.map { pkg ->
-                        AppInstallInfo(null, displayNameFromPackage(pkg), pkg, InstallStatus.INSTALLED)
-                    }
-                    val runId = nameResolveRunId.incrementAndGet()
-                    SwingUtilities.invokeAndWait {
-                        tableModel.resetItems(projectInfos, deviceItems)
-                        updateRowHeights()
-                        setLoading(false)
-                        setNameResolving(true)
-                        setStatus("Project Apps: ${projectInfos.size} · Installed Apps: ${userPkgs.size} · resolving names 0 / ${userPkgs.size}")
-                    }
-
-                    userPkgs.forEachIndexed { index, pkg ->
-                        if (runId != nameResolveRunId.get()) return@forEachIndexed
-                        val label = AdbService.getApplicationLabel(serial, pkg, adbPath)
-                        if (runId != nameResolveRunId.get()) return@forEachIndexed
-                        val item = AppInstallInfo(null, label, pkg, InstallStatus.INSTALLED)
-                        SwingUtilities.invokeAndWait {
-                            if (runId == nameResolveRunId.get()) {
-                                tableModel.updateDeviceLabel(item.packageName, item.moduleName)
-                                setStatus("Project Apps: ${projectInfos.size} · Installed Apps: ${userPkgs.size} · resolving names ${index + 1} / ${userPkgs.size}")
-                            }
-                        }
-                    }
-
-                    SwingUtilities.invokeLater {
-                        if (runId == nameResolveRunId.get()) {
-                            setNameResolving(false)
-                            setStatus(
-                                buildString {
-                                    append("Project Apps: ${projectInfos.size} · Installed Apps: ${userPkgs.size}")
-                                    if (projectLoadStatus.isNotBlank()) append(" · ").append(projectLoadStatus)
-                                }
-                            )
-                        }
-                    }
+                    resolveDeviceApps(serial, freshSnapshot, projectInfos)
                 } else {
                     SwingUtilities.invokeLater {
                         tableModel.resetItems(projectInfos)
@@ -383,18 +430,54 @@ class UninstallDialog(
         }.also { it.isDaemon = true; it.name = "AppPurge-ADB" }.start()
     }
 
+    private fun resolveDeviceApps(serial: String, snapshot: AdbService.PackageSnapshot, projectInfos: List<AppInstallInfo>) {
+        val projectPkgs = projectInfos.map { it.packageName }.toSet()
+        val userPkgs = (snapshot.userPackages - projectPkgs).sorted()
+        val deviceItems = userPkgs.map { pkg ->
+            AppInstallInfo(null, displayNameFromPackage(pkg), pkg, InstallStatus.USER_APP)
+        }
+        val runId = nameResolveRunId.incrementAndGet()
+        SwingUtilities.invokeAndWait {
+            tableModel.resetItems(projectInfos, deviceItems)
+            updateRowHeights()
+            setLoading(false)
+            setNameResolving(true)
+            setStatus("Project Apps: ${projectInfos.size} · Installed Apps: ${userPkgs.size} · resolving names 0 / ${userPkgs.size}")
+        }
+        userPkgs.forEachIndexed { index, pkg ->
+            if (runId != nameResolveRunId.get()) return@forEachIndexed
+            val label = AdbService.getApplicationLabel(serial, pkg, adbPath)
+            if (runId != nameResolveRunId.get()) return@forEachIndexed
+            SwingUtilities.invokeAndWait {
+                if (runId == nameResolveRunId.get()) {
+                    tableModel.updateDeviceLabel(pkg, label)
+                    setStatus("Project Apps: ${projectInfos.size} · Installed Apps: ${userPkgs.size} · resolving names ${index + 1} / ${userPkgs.size}")
+                }
+            }
+        }
+        SwingUtilities.invokeLater {
+            if (runId == nameResolveRunId.get()) {
+                setNameResolving(false)
+                setStatus(
+                    buildString {
+                        append("Project Apps: ${projectInfos.size} · Installed Apps: ${userPkgs.size}")
+                        val ps = projectLoadStatus(projectInfos)
+                        if (ps.isNotBlank()) append(" · ").append(ps)
+                    }
+                )
+            }
+        }
+    }
+
     private fun scanProjectModulesWithRetry(): List<AppInstallInfo> {
         repeat(PROJECT_SCAN_MAX_ATTEMPTS) { index ->
             val infos = AppModuleScanner.scan(project)
             if (infos.isNotEmpty()) return infos
-
             val attempt = index + 1
             SwingUtilities.invokeLater {
                 setStatus("Waiting for Android application modules to load… $attempt / $PROJECT_SCAN_MAX_ATTEMPTS")
             }
-            if (attempt < PROJECT_SCAN_MAX_ATTEMPTS) {
-                Thread.sleep(PROJECT_SCAN_RETRY_DELAY_MS)
-            }
+            if (attempt < PROJECT_SCAN_MAX_ATTEMPTS) Thread.sleep(PROJECT_SCAN_RETRY_DELAY_MS)
         }
         return emptyList()
     }
@@ -417,20 +500,21 @@ class UninstallDialog(
         uninstallBtn.isEnabled = false
         setStatus("Uninstalling…")
         Thread {
-            var successCnt = 0
-            selected.forEach { info ->
-                val ok = AdbService.uninstall(serial, info.packageName, adbPath)
-                if (ok) successCnt++
-                SwingUtilities.invokeLater {
-                    if (ok && !info.isFromProject) {
-                        tableModel.removeDeviceItem(info.packageName)
-                        updateRowHeights()
-                    } else {
-                        tableModel.updateRow(info.packageName, if (ok) InstallStatus.NOT_INSTALLED else info.status)
-                    }
-                }
+            val results = selected.map { info -> info to AdbService.uninstallPackage(serial, info.packageName, adbPath) }
+            val snapshot = AdbService.getPackageSnapshot(serial, adbPath)
+            val statuses = results.map { (info, result) ->
+                val newStatus = AdbService.queryProjectPackageStatus(
+                    serial, info.packageName, snapshot.installedPackages, snapshot.systemPackages, adbPath,
+                )
+                Triple(info, result, newStatus)
             }
+            var successCnt = 0
             SwingUtilities.invokeLater {
+                statuses.forEach { (info, result, newStatus) ->
+                    val ok = result.success || newStatus == InstallStatus.NOT_INSTALLED || newStatus == InstallStatus.SYSTEM_APP
+                    if (ok) successCnt++
+                    applyPostOperationStatus(info, newStatus)
+                }
                 uninstallBtn.isEnabled = true
                 setStatus("Uninstalled $successCnt / ${selected.size}")
             }
@@ -473,14 +557,17 @@ class UninstallDialog(
         refreshActionRendering()
         Thread {
             val result = AdbService.clearAppData(serial, info.packageName, adbPath)
+            val newStatus = AdbService.getPackageState(serial, info.packageName, adbPath)
+            val currentUser = if (!result.success) AdbService.getCurrentUser(serial, adbPath) else ""
             SwingUtilities.invokeLater {
                 clearingPackages.remove(info.packageName)
                 refreshActionRendering()
+                tableModel.updateRow(info.packageName, newStatus)
                 if (result.success) {
                     setStatus("")
                 } else {
                     setStatus("Clear data failed: ${info.packageName}")
-                    Messages.showErrorDialog(commandFailureMessage("Failed to clear app data.", result.output), "AppPurge Clear Data Failed")
+                    Messages.showErrorDialog(commandFailureMessage(currentUser, "Failed to clear app data.", result.output, info), "AppPurge Clear Data Failed")
                 }
             }
         }.also { it.isDaemon = true }.start()
@@ -496,20 +583,17 @@ class UninstallDialog(
         refreshActionRendering()
         Thread {
             val result = AdbService.uninstallPackage(serial, info.packageName, adbPath)
+            val newStatus = AdbService.getPackageState(serial, info.packageName, adbPath)
+            val currentUser = if (!result.success && newStatus != InstallStatus.NOT_INSTALLED && newStatus != InstallStatus.SYSTEM_APP) AdbService.getCurrentUser(serial, adbPath) else ""
             SwingUtilities.invokeLater {
                 uninstallingPackages.remove(info.packageName)
                 refreshActionRendering()
-                if (result.success) {
-                    if (info.isFromProject) {
-                        tableModel.updateRow(info.packageName, InstallStatus.NOT_INSTALLED)
-                    } else {
-                        tableModel.removeDeviceItem(info.packageName)
-                        updateRowHeights()
-                    }
+                applyPostOperationStatus(info, newStatus)
+                if (result.success || newStatus == InstallStatus.NOT_INSTALLED || newStatus == InstallStatus.SYSTEM_APP) {
                     setStatus("")
                 } else {
                     setStatus("Uninstall failed: ${info.packageName}")
-                    Messages.showErrorDialog(commandFailureMessage("Failed to uninstall app.", result.output), "AppPurge Uninstall Failed")
+                    Messages.showErrorDialog(commandFailureMessage(currentUser, "Failed to uninstall app.", result.output, info), "AppPurge Uninstall Failed")
                 }
             }
         }.also { it.isDaemon = true }.start()
@@ -520,31 +604,34 @@ class UninstallDialog(
         refreshActionRendering()
         Thread {
             val result = AdbService.installApk(serial, apk.absolutePath, adbPath)
-            val installed = if (result.success) {
-                info.packageName in AdbService.getAllInstalledPackages(serial, adbPath)
-            } else {
-                false
-            }
-            val installTimeMs = if (installed) {
-                AdbService.getInstallTime(serial, info.packageName, adbPath)
-            } else {
-                0L
-            }
+            val newStatus = AdbService.getPackageState(serial, info.packageName, adbPath)
+            val currentUser = if (!result.success) AdbService.getCurrentUser(serial, adbPath) else ""
+            val installTimeMs = if (newStatus.isInstalled) AdbService.getInstallTime(serial, info.packageName, adbPath) else 0L
             SwingUtilities.invokeLater {
                 reinstallingPackages.remove(info.packageName)
                 refreshActionRendering()
-                if (installed) {
-                    tableModel.updateRow(info.packageName, InstallStatus.INSTALLED, installTimeMs)
+                if (newStatus.isInstalled) {
+                    tableModel.updateRow(info.packageName, newStatus, installTimeMs)
                     setStatus("")
                 } else {
+                    tableModel.updateRow(info.packageName, newStatus)
                     setStatus("Install failed: ${info.packageName}")
                     Messages.showErrorDialog(
-                        commandFailureMessage("Failed to install APK with adb install -r -t.", result.output),
+                        commandFailureMessage(currentUser, "Failed to install APK with adb install -r -t.", result.output, info),
                         "AppPurge Install Failed",
                     )
                 }
             }
         }.also { it.isDaemon = true }.start()
+    }
+
+    private fun applyPostOperationStatus(info: AppInstallInfo, status: InstallStatus) {
+        if (!info.isFromProject && (status == InstallStatus.NOT_INSTALLED || status == InstallStatus.SYSTEM_APP)) {
+            tableModel.removeDeviceItem(info.packageName)
+            updateRowHeights()
+        } else {
+            tableModel.updateRow(info.packageName, status)
+        }
     }
 
     private fun setStatus(text: String) {
@@ -570,7 +657,7 @@ class UninstallDialog(
     private fun updateSummary() {
         if (!this::tableModel.isInitialized) return
         val visible = tableModel.visibleItems
-        val installed = visible.count { it.status == InstallStatus.INSTALLED }
+        val installed = visible.count { it.isInstalled }
         val selected = tableModel.selectedCount
         summaryLabel.text = buildString {
             if (selected > 0) append("$selected selected · ")
@@ -583,51 +670,9 @@ class UninstallDialog(
 
     private fun dividerLineEndX(): Int {
         if (!this::table.isInitialized) return 0
-        val actionColumnRect = table.getCellRect(0, UninstallTableModel.COL_ACTION, true)
-        val totalWidth = actionGroupWidth(RowAction.entries)
-        val startX = actionColumnRect.x + ((actionColumnRect.width - totalWidth) / 2).coerceAtLeast(0)
-        return (startX + totalWidth).coerceAtMost(table.width - DIVIDER_LINE_INSET)
+        val lastColRect = table.getCellRect(0, UninstallTableModel.COL_UNINSTALL, true)
+        return (lastColRect.x + lastColRect.width - DIVIDER_LINE_INSET).coerceAtMost(table.width - DIVIDER_LINE_INSET)
     }
-
-    private fun actionAt(row: Int, x: Int): RowAction? {
-        val info = (tableModel.rows.getOrNull(row) as? TableRow.Data)?.info ?: return null
-        val cell = table.getCellRect(row, UninstallTableModel.COL_ACTION, true)
-        val localX = x - cell.x
-        val actions = actionsFor(info)
-        val totalWidth = actionGroupWidth(actions)
-        val fullWidth = actionGroupWidth(RowAction.entries)
-        val fullStartX = ((cell.width - fullWidth) / 2).coerceAtLeast(0)
-        val startX = fullStartX + fullWidth - totalWidth
-        if (localX < startX || localX >= startX + totalWidth) return null
-        val offset = localX - startX
-        val stride = ACTION_BUTTON_SIZE + ACTION_BUTTON_GAP
-        val idx = offset / stride
-        if (offset % stride >= ACTION_BUTTON_SIZE) return null
-        if (idx !in actions.indices) return null
-        val action = actions[idx]
-        return action.takeIf { isActionEnabled(it, info) }
-    }
-
-    private fun actionTargetAt(e: MouseEvent): RowActionTarget? {
-        if (!this::table.isInitialized) return null
-        val row = table.rowAtPoint(e.point)
-        if (row < 0 || table.columnAtPoint(e.point) != UninstallTableModel.COL_ACTION) return null
-        val info = (tableModel.rows.getOrNull(row) as? TableRow.Data)?.info ?: return null
-        val action = actionAt(row, e.point.x) ?: return null
-        return RowActionTarget(row, info.packageName, action)
-    }
-
-    private fun setPressedAction(target: RowActionTarget?) {
-        if (pressedAction == target) return
-        pressedAction = target
-        if (this::table.isInitialized) table.repaint()
-    }
-
-    private fun actionsFor(info: AppInstallInfo): List<RowAction> =
-        if (info.isFromProject) RowAction.entries else listOf(RowAction.CLEAR, RowAction.UNINSTALL)
-
-    private fun actionGroupWidth(actions: List<RowAction>): Int =
-        actions.size * ACTION_BUTTON_SIZE + (actions.size - 1).coerceAtLeast(0) * ACTION_BUTTON_GAP
 
     private fun activeAction(info: AppInstallInfo): RowAction? = when (info.packageName) {
         in reinstallingPackages -> RowAction.REINSTALL
@@ -641,7 +686,7 @@ class UninstallDialog(
         if (activeAction(info) != null) return false
         return when (action) {
             RowAction.REINSTALL -> info.isFromProject && info.apkFiles.isNotEmpty()
-            RowAction.CLEAR -> info.status == InstallStatus.INSTALLED
+            RowAction.CLEAR -> info.isClearDataEnabled
             RowAction.UNINSTALL -> info.isUninstallable
         }
     }
@@ -684,6 +729,7 @@ class UninstallDialog(
             <b>${htmlEscape(module)}</b><br>
             Package: ${htmlEscape(info.packageName)}<br>
             Status: ${htmlEscape(statusText(info.status))}<br>
+            ${statusNote(info.status)}
             Install time: ${htmlEscape(installTime)}<br>
             APK: $apkText
             </html>
@@ -691,10 +737,17 @@ class UninstallDialog(
     }
 
     private fun statusText(status: InstallStatus): String = when (status) {
-        InstallStatus.INSTALLED -> "Installed"
+        InstallStatus.USER_APP -> "Installed"
+        InstallStatus.UPDATED_SYSTEM_APP -> "Installed"
+        InstallStatus.SYSTEM_APP -> "Installed (system)"
         InstallStatus.NOT_INSTALLED -> "Not installed"
-        InstallStatus.SYSTEM_ONLY -> "System (cannot uninstall)"
         InstallStatus.UNKNOWN -> "Querying..."
+    }
+
+    private fun statusNote(status: InstallStatus): String = when (status) {
+        InstallStatus.UPDATED_SYSTEM_APP -> "Note: uninstall removes the updated APK and restores the system version.<br>"
+        InstallStatus.SYSTEM_APP -> "Note: system app; uninstall is disabled but data can be cleared.<br>"
+        else -> ""
     }
 
     private fun actionTooltip(action: RowAction, info: AppInstallInfo): String = when (action) {
@@ -707,7 +760,7 @@ class UninstallDialog(
         !info.isFromProject -> "Device-only app, cannot reinstall"
         info.apkFiles.isEmpty() -> "No APK found — build first"
         else -> {
-            val actionText = if (info.status == InstallStatus.INSTALLED) "Reinstall" else "Install"
+            val actionText = if (info.isInstalled) "Reinstall" else "Install"
             """
                 <html>
                 ${htmlEscape(actionText)}<br>
@@ -733,12 +786,22 @@ class UninstallDialog(
             .replace(">", "&gt;")
             .replace("\"", "&quot;")
 
-    private fun commandFailureMessage(summary: String, output: String): String {
+    private fun commandFailureMessage(currentUser: String, summary: String, output: String, info: AppInstallInfo): String {
         val details = output.takeIf(String::isNotBlank) ?: "ADB returned no output."
-        return "$summary\n\n$details"
+        return """
+            $summary
+
+            Package: ${info.packageName}
+            Current user: $currentUser
+            Status: ${statusText(info.status)}
+            Uninstallable: ${info.isUninstallable}
+            Clear data enabled: ${info.isClearDataEnabled}
+
+            ADB output:
+            $details
+        """.trimIndent()
     }
 
-    // "app-debug.apk  [debug]  06-03 14:22"
     private fun apkLabel(f: File): String {
         val folder = f.parentFile?.name ?: ""
         val time = SimpleDateFormat("MM-dd HH:mm").format(Date(f.lastModified()))
@@ -750,11 +813,10 @@ class UninstallDialog(
         return "${f.name}  [$folder]"
     }
 
-    // ── Renderer ──────────────────────────────────────────────────────────────
+    // ── Renderers ─────────────────────────────────────────────────────────────
 
     private inner class UniversalRenderer : TableCellRenderer {
         private val textRenderer = DefaultTableCellRenderer()
-        private val spinnerIcon = AnimatedIcon.Default()
         private val checkbox = JCheckBox().apply {
             isOpaque = true
             horizontalAlignment = SwingConstants.CENTER
@@ -762,101 +824,45 @@ class UninstallDialog(
             isRequestFocusEnabled = false
             model.isRollover = false
         }
-        private val actionPanel = JPanel(GridBagLayout()).apply { isOpaque = true }
-        private val actionButtonByType = RowAction.entries.associateWith { action ->
-            JButton().apply {
-                icon = action.enabledIcon
-                disabledIcon = action.disabledIcon
-                preferredSize = Dimension(ACTION_BUTTON_SIZE, ACTION_BUTTON_SIZE)
-                minimumSize = preferredSize
-                maximumSize = preferredSize
-                isFocusable = false
-                isFocusPainted = false
-                isBorderPainted = false
-                isContentAreaFilled = false
-                isOpaque = false
-                margin = Insets(0, 0, 0, 0)
-                text = ""
-            }
-        }
 
         override fun getTableCellRendererComponent(
             tbl: JTable, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, col: Int,
         ): Component = when (val r = tableModel.rows[row]) {
-            is TableRow.Divider -> dividerCell(tbl, col)
-            is TableRow.Data -> dataCell(r, tbl, value, isSelected, hasFocus, row, col)
+            is TableRow.Divider -> JPanel().apply { background = tbl.background; isOpaque = true }
+            is TableRow.Data -> dataCell(r, tbl, value, row, col)
         }
 
-        private fun dividerCell(tbl: JTable, col: Int): Component =
-            JPanel().apply {
-                background = tbl.background
-                isOpaque = true
-            }
-
-        private fun dataCell(
-            r: TableRow.Data, tbl: JTable, value: Any?,
-            isSelected: Boolean, hasFocus: Boolean, row: Int, col: Int,
-        ): Component = when (col) {
-            UninstallTableModel.COL_CHECK -> checkbox.apply {
-                this.isSelected = r.selected
-                isEnabled = r.info.isUninstallable
-                background = rowBackground(tbl, row, r)
-                model.isRollover = false
-                model.isArmed = false
-                model.isPressed = false
-            }
-            UninstallTableModel.COL_ACTION -> {
-                actionPanel.apply {
-                    removeAll()
-                    background = rowBackground(tbl, row, r)
-                    val activeAction = activeAction(r.info)
-                    add(Box.createHorizontalStrut(actionGroupWidth(RowAction.entries) - actionGroupWidth(actionsFor(r.info))), GridBagConstraints().apply {
-                        gridx = 0
-                    })
-                    actionsFor(r.info).forEachIndexed { index, action ->
-                        val enabled = isActionEnabled(action, r.info)
-                        val button = actionButtonByType.getValue(action).apply {
-                            isEnabled = enabled
-                            icon = if (activeAction == action) spinnerIcon else action.enabledIcon
-                            disabledIcon = if (activeAction == action) spinnerIcon else action.disabledIcon
-                            toolTipText = if (activeAction == action) action.loadingTooltip else actionTooltip(action, r.info)
-                        }
-                        add(button, GridBagConstraints().apply {
-                            gridx = index + 1
-                            insets = Insets(0, if (index == 0) 0 else ACTION_BUTTON_GAP, 0, 0)
-                        })
+        private fun dataCell(r: TableRow.Data, tbl: JTable, value: Any?, row: Int, col: Int): Component =
+            when (col) {
+                UninstallTableModel.COL_CHECK -> checkbox.apply {
+                    this.isSelected = r.selected
+                    isEnabled = r.info.isUninstallable
+                    background = tbl.background
+                    model.isRollover = false
+                    model.isArmed = false
+                    model.isPressed = false
+                }
+                UninstallTableModel.COL_APP -> appCell(r, tbl)
+                else -> {
+                    val c = textRenderer.getTableCellRendererComponent(tbl, value, false, false, row, col)
+                    c.background = tbl.background
+                    (c as? JLabel)?.border = JBUI.Borders.empty()
+                    (c as? JLabel)?.horizontalAlignment = SwingConstants.CENTER
+                    (c as? JLabel)?.foreground = when (r.info.status) {
+                        InstallStatus.USER_APP -> Color(0x82, 0xCC, 0x8D)
+                        InstallStatus.UPDATED_SYSTEM_APP -> Color(0x82, 0xCC, 0x8D)
+                        InstallStatus.SYSTEM_APP -> Color(0x64, 0xB5, 0xF6)
+                        else -> UIManager.getColor("Label.disabledForeground") ?: Color(0x9A, 0x9D, 0xA4)
                     }
+                    c
                 }
             }
-            UninstallTableModel.COL_APP -> appCell(r, tbl, row)
-            else -> {
-                val c = textRenderer.getTableCellRendererComponent(tbl, value, false, false, row, col)
-                c.background = rowBackground(tbl, row, r)
-                (c as? JLabel)?.border = if (col == UninstallTableModel.COL_STATUS) {
-                    JBUI.Borders.empty()
-                } else {
-                    JBUI.Borders.emptyLeft(16)
-                }
-                (c as? JLabel)?.horizontalAlignment = if (col == UninstallTableModel.COL_STATUS) {
-                    SwingConstants.CENTER
-                } else {
-                    SwingConstants.LEFT
-                }
-                (c as? JLabel)?.foreground = when (r.info.status) {
-                    InstallStatus.INSTALLED -> Color(0x82, 0xCC, 0x8D)
-                    else -> UIManager.getColor("Label.disabledForeground") ?: Color(0x9A, 0x9D, 0xA4)
-                }
-                c
-            }
-        }
 
-        private fun rowBackground(tbl: JTable, row: Int, data: TableRow.Data): Color = tbl.background
-
-        private fun appCell(rowData: TableRow.Data, tbl: JTable, row: Int): Component =
+        private fun appCell(rowData: TableRow.Data, tbl: JTable): Component =
             JPanel().apply {
                 layout = BoxLayout(this, BoxLayout.Y_AXIS)
                 border = JBUI.Borders.empty(5, 10, 5, 16)
-                background = rowBackground(tbl, row, rowData)
+                background = tbl.background
                 isOpaque = true
                 val info = rowData.info
                 val primary = info.moduleName.ifEmpty { displayNameFromPackage(info.packageName) }
@@ -876,14 +882,88 @@ class UninstallDialog(
             }
     }
 
+    private inner class ActionCellRenderer(private val action: RowAction) : TableCellRenderer {
+        private val spinnerIcon = AnimatedIcon.Default()
+        private val panel = JPanel(GridBagLayout()).apply { isOpaque = true }
+        private val btn = JButton().apply {
+            isBorderPainted = false
+            isContentAreaFilled = false
+            isFocusPainted = false
+            isOpaque = false
+            isFocusable = false
+            preferredSize = Dimension(ACTION_BUTTON_SIZE, ACTION_BUTTON_SIZE)
+            minimumSize = preferredSize
+            maximumSize = preferredSize
+            margin = Insets(0, 0, 0, 0)
+            text = ""
+        }
+        init { panel.add(btn) }
+
+        override fun getTableCellRendererComponent(
+            tbl: JTable, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, col: Int,
+        ): Component {
+            val r = tableModel.rows[row]
+            if (r is TableRow.Divider || (r is TableRow.Data && action == RowAction.REINSTALL && !r.info.isFromProject)) {
+                btn.isVisible = false
+                panel.background = tbl.background
+                return panel
+            }
+            r as TableRow.Data
+            btn.isVisible = true
+            val isActive = activeAction(r.info) == action
+            btn.icon = if (isActive) spinnerIcon else action.enabledIcon
+            btn.disabledIcon = if (isActive) spinnerIcon else action.disabledIcon
+            btn.isEnabled = isActionEnabled(action, r.info)
+            panel.background = tbl.background
+            return panel
+        }
+    }
+
+    private inner class ActionCellEditor(private val action: RowAction) : AbstractCellEditor(), TableCellEditor {
+        private val spinnerIcon = AnimatedIcon.Default()
+        private val panel = JPanel(GridBagLayout()).apply { isOpaque = true }
+        private val btn = JButton().apply {
+            isBorderPainted = false
+            isContentAreaFilled = false
+            isFocusPainted = false
+            isOpaque = false
+            preferredSize = Dimension(ACTION_BUTTON_SIZE, ACTION_BUTTON_SIZE)
+            minimumSize = preferredSize
+            maximumSize = preferredSize
+            margin = Insets(0, 0, 0, 0)
+            text = ""
+        }
+        init { panel.add(btn) }
+
+        override fun isCellEditable(e: EventObject?): Boolean {
+            val me = e as? MouseEvent ?: return true
+            val tbl = me.source as? JTable ?: return false
+            val row = tbl.rowAtPoint(me.point)
+            val r = tableModel.rows.getOrNull(row) as? TableRow.Data ?: return false
+            return isActionEnabled(action, r.info)
+        }
+
+        override fun getCellEditorValue(): Any = ""
+
+        override fun getTableCellEditorComponent(tbl: JTable, value: Any?, isSelected: Boolean, row: Int, col: Int): Component {
+            val r = tableModel.rows.getOrNull(row) as? TableRow.Data
+            val isActive = r?.info?.let { activeAction(it) } == action
+            btn.icon = if (isActive) spinnerIcon else action.enabledIcon
+            btn.disabledIcon = if (isActive) spinnerIcon else action.disabledIcon
+            btn.isEnabled = r != null && isActionEnabled(action, r.info)
+            // Highlight the entire cell to signal the click — same depth as JBTable's editing indicator
+            panel.background = blendColors(
+                UIManager.getColor("Button.focusedBorderColor") ?: Color(0x5D, 0x8D, 0xFF),
+                tbl.background,
+                0.22f,
+            )
+            return panel
+        }
+    }
+
     private class CenterHeaderRenderer(private val delegate: TableCellRenderer) : TableCellRenderer {
         override fun getTableCellRendererComponent(
-            table: JTable,
-            value: Any?,
-            isSelected: Boolean,
-            hasFocus: Boolean,
-            row: Int,
-            column: Int,
+            table: JTable, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, column: Int,
         ): Component {
             val c = delegate.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
             (c as? JLabel)?.horizontalAlignment = SwingConstants.CENTER
@@ -891,6 +971,10 @@ class UninstallDialog(
         }
     }
 }
+
+// ── Extension helper used in onReinstall ──────────────────────────────────────
+private val InstallStatus.isInstalled: Boolean
+    get() = this == InstallStatus.USER_APP || this == InstallStatus.UPDATED_SYSTEM_APP || this == InstallStatus.SYSTEM_APP
 
 private fun displayNameFromPackage(packageName: String): String =
     packageName.substringAfterLast('.')
@@ -907,18 +991,6 @@ private fun blendColors(foreground: Color, background: Color, foregroundWeight: 
         (foreground.green * fg + background.green * bg).toInt(),
         (foreground.blue * fg + background.blue * bg).toInt(),
     )
-}
-
-private fun actionPressedBackground(base: Color): Color =
-    blendColors(Color(0x5D, 0x8D, 0xFF), base, 0.34f)
-
-private data class RowActionTarget(
-    val row: Int,
-    val packageName: String,
-    val action: RowAction,
-) {
-    fun matches(info: AppInstallInfo, action: RowAction): Boolean =
-        packageName == info.packageName && this.action == action
 }
 
 private enum class RowAction {

@@ -89,6 +89,11 @@ class UninstallTableModel : AbstractTableModel() {
         }
     }
 
+    fun notifyRowChanged(packageName: String) {
+        val idx = rows.indexOfFirst { it is TableRow.Data && it.info.packageName == packageName }
+        if (idx >= 0) fireTableRowsUpdated(idx, idx)
+    }
+
     fun setSelectAll(select: Boolean) {
         rows.forEachIndexed { i, row ->
             if (row is TableRow.Data && row.info.isUninstallable) {
@@ -110,7 +115,11 @@ class UninstallTableModel : AbstractTableModel() {
 
     override fun isCellEditable(row: Int, col: Int): Boolean {
         val r = rows[row]
-        return col == COL_CHECK && r is TableRow.Data && r.info.isUninstallable
+        return when (col) {
+            COL_CHECK -> r is TableRow.Data && r.info.isUninstallable
+            COL_REINSTALL, COL_CLEAR, COL_UNINSTALL -> r is TableRow.Data
+            else -> false
+        }
     }
 
     override fun getValueAt(row: Int, col: Int): Any = when (val r = rows[row]) {
@@ -119,7 +128,7 @@ class UninstallTableModel : AbstractTableModel() {
             COL_CHECK -> r.selected
             COL_APP -> r.info.moduleName.ifEmpty { r.info.packageName }
             COL_STATUS -> statusText(r.info)
-            COL_ACTION -> ""
+            COL_REINSTALL, COL_CLEAR, COL_UNINSTALL -> ""
             else -> ""
         }
     }
@@ -135,20 +144,24 @@ class UninstallTableModel : AbstractTableModel() {
         const val COL_CHECK = 0
         const val COL_APP = 1
         const val COL_STATUS = 2
-        const val COL_ACTION = 3
-        val COLUMNS = arrayOf("", "App", "Status", "Options")
+        const val COL_REINSTALL = 3
+        const val COL_CLEAR = 4
+        const val COL_UNINSTALL = 5
+        val COLUMNS = arrayOf("", "App", "Status", "", "", "")
 
         private fun statusOrder(info: AppInstallInfo) = when (info.status) {
-            InstallStatus.INSTALLED -> 0
-            InstallStatus.NOT_INSTALLED -> 1
-            InstallStatus.SYSTEM_ONLY -> 2
-            InstallStatus.UNKNOWN -> 3
+            InstallStatus.USER_APP -> 0
+            InstallStatus.UPDATED_SYSTEM_APP -> 1
+            InstallStatus.SYSTEM_APP -> 2
+            InstallStatus.NOT_INSTALLED -> 3
+            InstallStatus.UNKNOWN -> 4
         }
 
         private fun statusText(info: AppInstallInfo) = when (info.status) {
-            InstallStatus.INSTALLED -> "Installed"
+            InstallStatus.USER_APP -> "Installed"
+            InstallStatus.UPDATED_SYSTEM_APP -> "Installed"
+            InstallStatus.SYSTEM_APP -> "Installed (system)"
             InstallStatus.NOT_INSTALLED -> "Not installed"
-            InstallStatus.SYSTEM_ONLY -> "System (cannot uninstall)"
             InstallStatus.UNKNOWN -> "Querying…"
         }
     }
