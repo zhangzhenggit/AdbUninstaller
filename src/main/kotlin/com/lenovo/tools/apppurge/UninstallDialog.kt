@@ -1,11 +1,14 @@
 package com.lenovo.tools.apppurge
 
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.fileChooser.FileChooser
+import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.util.IconLoader
 import com.intellij.ui.AnimatedIcon
+import com.intellij.ui.ComboboxWithBrowseButton
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.table.JBTable
 import com.intellij.util.ui.JBUI
@@ -24,7 +27,7 @@ import javax.swing.table.JTableHeader
 import javax.swing.table.TableCellEditor
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.45"
+private const val PLUGIN_VERSION = "1.2.61"
 private const val TOGGLE_DEFAULT = "Show All Installed Apps"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -35,10 +38,15 @@ private val ACTION_COLS = setOf(
     UninstallTableModel.COL_REINSTALL,
     UninstallTableModel.COL_CLEAR,
     UninstallTableModel.COL_UNINSTALL,
+    UninstallTableModel.COL_PUSH,
 )
 private const val DIVIDER_LINE_INSET = 18
 private const val PROJECT_SCAN_MAX_ATTEMPTS = 20
 private const val PROJECT_SCAN_RETRY_DELAY_MS = 1500L
+private const val PUSH_DIALOG_MIN_FIELD_WIDTH = 430
+private const val PUSH_DIALOG_MAX_FIELD_WIDTH = 460
+private const val PUSH_DIALOG_CONTENT_WIDTH = 560
+private const val PUSH_DIALOG_FIELD_HEIGHT = 32
 
 class UninstallDialog(
     private val project: Project,
@@ -63,6 +71,7 @@ class UninstallDialog(
     private val reinstallingPackages = mutableSetOf<String>()
     private val clearingPackages = mutableSetOf<String>()
     private val uninstallingPackages = mutableSetOf<String>()
+    private val pushingPackages = mutableSetOf<String>()
     private var actionSpinnerTimer: Timer? = null
     private var copyStatusTimer: Timer? = null
     private var pressedActionRow = -1
@@ -78,6 +87,7 @@ class UninstallDialog(
     }
     private var cachedSnapshot: AdbService.PackageSnapshot? = null
     private var cachedSnapshotSerial: String? = null
+    private lateinit var rebootRequiredBtn: JButton
 
     init {
         title = "APK Manager"
@@ -111,6 +121,7 @@ class UninstallDialog(
                     UninstallTableModel.COL_REINSTALL -> actionTooltip(RowAction.REINSTALL, data.info)
                     UninstallTableModel.COL_CLEAR -> actionTooltip(RowAction.CLEAR, data.info)
                     UninstallTableModel.COL_UNINSTALL -> actionTooltip(RowAction.UNINSTALL, data.info)
+                    UninstallTableModel.COL_PUSH -> actionTooltip(RowAction.PUSH, data.info)
                     else -> appTooltip(data.info)
                 }
             }
@@ -125,8 +136,8 @@ class UninstallDialog(
             columnModel.getColumn(UninstallTableModel.COL_CHECK).apply { maxWidth = 54; minWidth = 54 }
             columnModel.getColumn(UninstallTableModel.COL_APP).preferredWidth = 280
             columnModel.getColumn(UninstallTableModel.COL_STATUS).preferredWidth = 110
-            for (col in listOf(UninstallTableModel.COL_REINSTALL, UninstallTableModel.COL_CLEAR, UninstallTableModel.COL_UNINSTALL)) {
-                columnModel.getColumn(col).apply { maxWidth = 96; minWidth = 96 }
+            for (col in listOf(UninstallTableModel.COL_REINSTALL, UninstallTableModel.COL_CLEAR, UninstallTableModel.COL_UNINSTALL, UninstallTableModel.COL_PUSH)) {
+                columnModel.getColumn(col).apply { maxWidth = DATA_ROW_HEIGHT; minWidth = DATA_ROW_HEIGHT }
             }
 
             val universalRenderer = UniversalRenderer()
@@ -145,15 +156,19 @@ class UninstallDialog(
                 it.cellRenderer = ActionCellRenderer(RowAction.UNINSTALL)
                 it.cellEditor = ActionCellEditor(RowAction.UNINSTALL)
             }
+            columnModel.getColumn(UninstallTableModel.COL_PUSH).also {
+                it.cellRenderer = ActionCellRenderer(RowAction.PUSH)
+                it.cellEditor = ActionCellEditor(RowAction.PUSH)
+            }
 
-            // Merged "Options" header spanning the three button columns
+            // Merged "Options" header spanning the action button columns
             tableHeader = object : JTableHeader(columnModel) {
                 init { defaultRenderer = CenterHeaderRenderer(defaultRenderer) }
                 override fun paintComponent(g: Graphics) {
                     super.paintComponent(g)
                     val r1 = getHeaderRect(UninstallTableModel.COL_REINSTALL)
-                    val r3 = getHeaderRect(UninstallTableModel.COL_UNINSTALL)
-                    val x = r1.x; val w = r3.x + r3.width - r1.x
+                    val r4 = getHeaderRect(UninstallTableModel.COL_PUSH)
+                    val x = r1.x; val w = r4.x + r4.width - r1.x
                     val g2 = g.create() as Graphics2D
                     g2.color = background
                     g2.fillRect(x + 1, 1, w - 2, height - 2)
@@ -205,6 +220,7 @@ class UninstallDialog(
                         UninstallTableModel.COL_REINSTALL -> chooseApkAndReinstall(serial, info)
                         UninstallTableModel.COL_CLEAR -> onClearData(serial, info)
                         UninstallTableModel.COL_UNINSTALL -> onUninstallOne(serial, info)
+                        UninstallTableModel.COL_PUSH -> showPushDialog(serial, info)
                     }
                 }
 
@@ -220,19 +236,47 @@ class UninstallDialog(
         toggleWrapper.add(showAllToggle, CARD_TOGGLE)
         toggleWrapper.add(spinnerLabel, CARD_LOADING)
 
-        val devicePanel = JPanel(FlowLayout(FlowLayout.LEFT, 8, 4)).apply {
+        val deviceControlsPanel = JPanel(FlowLayout(FlowLayout.LEFT, 8, 4)).apply {
             border = JBUI.Borders.empty(10, 10, 8, 10)
             add(JLabel("Device:"))
             add(deviceCombo.apply {
                 preferredSize = Dimension(290, 32)
-                addActionListener { reload() }
+                addActionListener {
+                    refreshRebootRequiredState()
+                    reload()
+                }
             })
             add(JButton("Refresh").apply {
                 preferredSize = Dimension(96, 32)
-                addActionListener { reload(rescanProject = true) }
+                addActionListener {
+                    refreshRebootRequiredState()
+                    reload(rescanProject = true)
+                }
             })
             add(toggleWrapper)
             showAllToggle.addActionListener { reload() }
+        }
+        val rebootPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 4)).apply {
+            border = JBUI.Borders.empty(10, 10, 8, 10)
+            rebootRequiredBtn = JButton(IconLoader.getIcon("/icons/action_reboot_required.svg", UninstallDialog::class.java)).apply {
+                isVisible = false
+                isBorderPainted = false
+                isContentAreaFilled = false
+                isFocusPainted = false
+                isOpaque = false
+                isFocusable = false
+                preferredSize = Dimension(ACTION_BUTTON_SIZE, ACTION_BUTTON_SIZE)
+                minimumSize = preferredSize
+                maximumSize = preferredSize
+                margin = Insets(0, 0, 0, 0)
+                toolTipText = "Reboot required for pushed system APK changes to take effect"
+                addActionListener { onRebootRequiredClicked() }
+            }
+            add(rebootRequiredBtn)
+        }
+        val devicePanel = JPanel(BorderLayout()).apply {
+            add(deviceControlsPanel, BorderLayout.WEST)
+            add(rebootPanel, BorderLayout.EAST)
         }
 
         val tableScroll = JBScrollPane(table).apply {
@@ -274,6 +318,7 @@ class UninstallDialog(
             add(rightPanel, BorderLayout.EAST)
         }
 
+        SwingUtilities.invokeLater { refreshRebootRequiredState() }
         return JPanel(BorderLayout(0, 6)).apply {
             border = JBUI.Borders.empty(0)
             add(devicePanel, BorderLayout.NORTH)
@@ -434,7 +479,12 @@ class UninstallDialog(
         val projectPkgs = projectInfos.map { it.packageName }.toSet()
         val userPkgs = (snapshot.userPackages - projectPkgs).sorted()
         val deviceItems = userPkgs.map { pkg ->
-            AppInstallInfo(null, displayNameFromPackage(pkg), pkg, InstallStatus.USER_APP)
+            AppInstallInfo(
+                module = null,
+                moduleName = displayNameFromPackage(pkg),
+                packageName = pkg,
+                status = InstallStatus.USER_APP,
+            )
         }
         val runId = nameResolveRunId.incrementAndGet()
         SwingUtilities.invokeAndWait {
@@ -625,6 +675,98 @@ class UninstallDialog(
         }.also { it.isDaemon = true }.start()
     }
 
+    private fun showPushDialog(serial: String, info: AppInstallInfo) {
+        if (!isActionEnabled(RowAction.PUSH, info)) return
+        Thread {
+            val target = AdbService.getSystemApkTarget(serial, info.packageName, info.systemPathName, adbPath)
+            SwingUtilities.invokeLater {
+                val dialog = PushSystemApkDialog(serial, info, target)
+                if (dialog.showAndGet()) {
+                    onPushSystemApk(serial, info, dialog.request())
+                }
+            }
+        }.also { it.isDaemon = true; it.name = "AppPurge-SystemTarget" }.start()
+    }
+
+    private fun onPushSystemApk(serial: String, info: AppInstallInfo, request: SystemPushRequest) {
+        if (!pushingPackages.add(info.packageName)) return
+        refreshActionRendering()
+        setStatus("Preparing device...")
+        Thread {
+            val remount = AdbService.prepareRootRemount(serial, adbPath)
+            if (!remount.success) {
+                SwingUtilities.invokeLater {
+                    pushingPackages.remove(info.packageName)
+                    refreshActionRendering()
+                    setStatus("Remount failed: ${info.packageName}")
+                    showRemountFailure(serial, remount)
+                }
+                return@Thread
+            }
+
+            SwingUtilities.invokeLater { setStatus("Pushing APK...") }
+            val result = AdbService.pushSystemApk(request)
+            val bootId = if (result.success) AdbService.getBootId(serial, adbPath) else null
+            val newStatus = AdbService.getPackageState(serial, info.packageName, adbPath)
+            SwingUtilities.invokeLater {
+                pushingPackages.remove(info.packageName)
+                refreshActionRendering()
+                tableModel.updateRow(info.packageName, newStatus)
+                if (result.success) {
+                    if (bootId != null) pendingRebootBootIds[serial] = bootId
+                    refreshRebootRequiredState()
+                    setStatus("Push completed, reboot required")
+                    showPushSuccess(serial)
+                } else {
+                    setStatus("Push failed: ${info.packageName}")
+                    Messages.showErrorDialog(
+                        pushFailureMessage(info, request, result),
+                        "AppPurge Push Failed",
+                    )
+                }
+            }
+        }.also { it.isDaemon = true; it.name = "AppPurge-SystemPush" }.start()
+    }
+
+    private fun showRemountFailure(serial: String, remount: RemountResult) {
+        val message = """
+            System partition is not writable.
+            The device may require reboot after adb root/remount, then run Push again.
+
+            ADB output:
+            ${remount.output.ifBlank { "ADB returned no output." }}
+        """.trimIndent()
+        val choice = Messages.showOkCancelDialog(
+            message,
+            "AppPurge Remount Failed",
+            "Reboot Now",
+            "Cancel",
+            Messages.getWarningIcon(),
+        )
+        if (choice == Messages.OK) rebootDevice(serial, clearPending = false)
+    }
+
+    private fun showPushSuccess(serial: String) {
+        val choice = Messages.showOkCancelDialog(
+            "Push completed.\nReboot is required for the system app to take effect.",
+            "AppPurge",
+            "Reboot Now",
+            "Later",
+            Messages.getInformationIcon(),
+        )
+        if (choice == Messages.OK) rebootDevice(serial, clearPending = true)
+    }
+
+    private fun rebootDevice(serial: String, clearPending: Boolean) {
+        if (clearPending) pendingRebootBootIds.remove(serial)
+        refreshRebootRequiredState()
+        setStatus("Rebooting device...")
+        Thread {
+            AdbService.exec(listOf(adbPath, "-s", serial, "reboot"), timeoutSec = 10)
+            SwingUtilities.invokeLater { setStatus("") }
+        }.also { it.isDaemon = true; it.name = "AppPurge-Reboot" }.start()
+    }
+
     private fun applyPostOperationStatus(info: AppInstallInfo, status: InstallStatus) {
         if (!info.isFromProject && (status == InstallStatus.NOT_INSTALLED || status == InstallStatus.SYSTEM_APP)) {
             tableModel.removeDeviceItem(info.packageName)
@@ -668,9 +810,48 @@ class UninstallDialog(
         uninstallBtn.isEnabled = !loading && selected > 0
     }
 
+    private fun refreshRebootRequiredState() {
+        if (!this::rebootRequiredBtn.isInitialized) return
+        val serial = currentSerial()
+        if (serial == null) {
+            rebootRequiredBtn.isVisible = false
+            return
+        }
+        val expectedBootId = pendingRebootBootIds[serial]
+        if (expectedBootId == null) {
+            rebootRequiredBtn.isVisible = false
+            return
+        }
+        Thread {
+            val currentBootId = AdbService.getBootId(serial, adbPath)
+            SwingUtilities.invokeLater {
+                val stillPending = currentBootId != null && pendingRebootBootIds[serial] == currentBootId
+                if (!stillPending) pendingRebootBootIds.remove(serial)
+                rebootRequiredBtn.isVisible = stillPending
+                rebootRequiredBtn.parent?.revalidate()
+                rebootRequiredBtn.parent?.repaint()
+            }
+        }.also { it.isDaemon = true; it.name = "AppPurge-BootId" }.start()
+    }
+
+    private fun onRebootRequiredClicked() {
+        val serial = currentSerial() ?: return
+        refreshRebootRequiredState()
+        if (!pendingRebootBootIds.containsKey(serial)) return
+        if (Messages.showOkCancelDialog(
+                "Reboot device now?",
+                "AppPurge",
+                "Reboot Now",
+                "Cancel",
+                Messages.getQuestionIcon(),
+            ) == Messages.OK) {
+            rebootDevice(serial, clearPending = true)
+        }
+    }
+
     private fun dividerLineEndX(): Int {
         if (!this::table.isInitialized) return 0
-        val lastColRect = table.getCellRect(0, UninstallTableModel.COL_UNINSTALL, true)
+        val lastColRect = table.getCellRect(0, UninstallTableModel.COL_PUSH, true)
         return (lastColRect.x + lastColRect.width - DIVIDER_LINE_INSET).coerceAtMost(table.width - DIVIDER_LINE_INSET)
     }
 
@@ -678,6 +859,7 @@ class UninstallDialog(
         in reinstallingPackages -> RowAction.REINSTALL
         in clearingPackages -> RowAction.CLEAR
         in uninstallingPackages -> RowAction.UNINSTALL
+        in pushingPackages -> RowAction.PUSH
         else -> null
     }
 
@@ -688,6 +870,7 @@ class UninstallDialog(
             RowAction.REINSTALL -> info.isFromProject && info.apkFiles.isNotEmpty()
             RowAction.CLEAR -> info.isClearDataEnabled
             RowAction.UNINSTALL -> info.isUninstallable
+            RowAction.PUSH -> info.isFromProject
         }
     }
 
@@ -710,7 +893,7 @@ class UninstallDialog(
     }
 
     private fun hasActiveAction(): Boolean =
-        reinstallingPackages.isNotEmpty() || clearingPackages.isNotEmpty() || uninstallingPackages.isNotEmpty()
+        reinstallingPackages.isNotEmpty() || clearingPackages.isNotEmpty() || uninstallingPackages.isNotEmpty() || pushingPackages.isNotEmpty()
 
     private fun appTooltip(info: AppInstallInfo): String {
         val module = info.moduleName.ifEmpty { "Device-only app" }
@@ -754,6 +937,7 @@ class UninstallDialog(
         RowAction.REINSTALL -> reinstallTooltip(info)
         RowAction.CLEAR -> "Clear app data"
         RowAction.UNINSTALL -> "Uninstall"
+        RowAction.PUSH -> pushTooltip(info)
     }
 
     private fun reinstallTooltip(info: AppInstallInfo): String = when {
@@ -764,6 +948,19 @@ class UninstallDialog(
             """
                 <html>
                 ${htmlEscape(actionText)}<br>
+                APK: ${htmlEscape(relativeApkPath(info.apkFiles.first()))}
+                </html>
+            """.trimIndent()
+        }
+    }
+
+    private fun pushTooltip(info: AppInstallInfo): String = when {
+        !info.isFromProject -> "Device-only app, cannot push"
+        info.apkFiles.isEmpty() -> "Push APK to system partition"
+        else -> {
+            """
+                <html>
+                Push to system partition<br>
                 APK: ${htmlEscape(relativeApkPath(info.apkFiles.first()))}
                 </html>
             """.trimIndent()
@@ -802,6 +999,20 @@ class UninstallDialog(
         """.trimIndent()
     }
 
+    private fun pushFailureMessage(info: AppInstallInfo, request: SystemPushRequest, result: SystemPushResult): String {
+        val details = result.output.takeIf(String::isNotBlank) ?: "ADB returned no output."
+        return """
+            Push failed while ${result.step}.
+
+            Package: ${info.packageName}
+            Local APK: ${request.localApk.absolutePath}
+            Target: ${request.targetPath}
+
+            ADB output:
+            $details
+        """.trimIndent()
+    }
+
     private fun apkLabel(f: File): String {
         val folder = f.parentFile?.name ?: ""
         val time = SimpleDateFormat("MM-dd HH:mm").format(Date(f.lastModified()))
@@ -811,6 +1022,159 @@ class UninstallDialog(
     private fun apkLabelWithoutTime(f: File): String {
         val folder = f.parentFile?.name ?: ""
         return "${f.name}  [$folder]"
+    }
+
+    private inner class PushSystemApkDialog(
+        private val serial: String,
+        private val info: AppInstallInfo,
+        private val target: SystemApkTarget,
+    ) : DialogWrapper(project, true) {
+        private val apkChoices = info.apkFiles
+        private var selectedApk: File? = apkChoices.firstOrNull()
+        private lateinit var apkCombo: ComboBox<String>
+        private val fieldWidth = preferredPushFieldWidth()
+        private val targetField = JTextField(target.targetPath).apply {
+            preferredSize = Dimension(fieldWidth, PUSH_DIALOG_FIELD_HEIGHT)
+        }
+        private val removeOverlayCheck = JCheckBox("Remove /data/app overlay", true)
+        private val clearDataCheck = JCheckBox("Clear app data", true)
+
+        init {
+            title = "Push System APK"
+            init()
+        }
+
+        override fun createCenterPanel(): JComponent {
+            val panel = JPanel(GridBagLayout()).apply {
+                border = JBUI.Borders.empty(8, 4, 4, 4)
+            }
+            val gbc = GridBagConstraints().apply {
+                gridx = 0
+                gridy = 0
+                anchor = GridBagConstraints.WEST
+                insets = Insets(7, 6, 7, 6)
+            }
+
+            fun addLabel(text: String) {
+                gbc.gridx = 0
+                gbc.weightx = 0.0
+                gbc.fill = GridBagConstraints.NONE
+                panel.add(JLabel(text), gbc)
+            }
+
+            fun addField(component: JComponent) {
+                gbc.gridx = 1
+                gbc.weightx = 0.0
+                gbc.fill = GridBagConstraints.NONE
+                gbc.anchor = GridBagConstraints.WEST
+                panel.add(component, gbc)
+                gbc.gridy++
+            }
+
+            addLabel("Package:")
+            addField(JTextField(info.packageName).apply {
+                isEditable = false
+                border = JBUI.Borders.empty(4, 6)
+                preferredSize = Dimension(fieldWidth, PUSH_DIALOG_FIELD_HEIGHT)
+            })
+
+            addLabel("Local APK:")
+            addField(localApkComponent())
+
+            addLabel("Device Target:")
+            addField(deviceTargetComponent())
+
+            gbc.gridx = 1
+            gbc.weightx = 0.0
+            gbc.fill = GridBagConstraints.NONE
+            gbc.anchor = GridBagConstraints.WEST
+            panel.add(JPanel(GridLayout(0, 1, 0, 2)).apply {
+                border = JBUI.Borders.emptyTop(4)
+                add(removeOverlayCheck)
+                add(clearDataCheck)
+            }, gbc)
+
+            return panel.apply {
+                preferredSize = Dimension(PUSH_DIALOG_CONTENT_WIDTH, 220)
+            }
+        }
+
+        private fun localApkComponent(): JComponent {
+            apkCombo = ComboBox(apkChoices.map { relativeApkPath(it) }.toTypedArray()).apply {
+                isEditable = true
+                if (apkChoices.isNotEmpty()) selectedIndex = 0
+                toolTipText = selectedApk?.absolutePath
+                addActionListener {
+                    val idx = selectedIndex
+                    if (idx >= 0 && idx < apkChoices.size) {
+                        selectedApk = apkChoices[idx]
+                        toolTipText = selectedApk?.absolutePath
+                    }
+                }
+            }
+            return ComboboxWithBrowseButton(apkCombo).apply {
+                preferredSize = Dimension(fieldWidth, PUSH_DIALOG_FIELD_HEIGHT)
+                toolTipText = "Choose APK"
+                addActionListener { chooseLocalApk() }
+            }
+        }
+
+        private fun preferredPushFieldWidth(): Int {
+            val fontMetrics = JLabel().getFontMetrics(UIManager.getFont("TextField.font") ?: UIManager.getFont("Label.font"))
+            val longest = listOf(
+                info.packageName,
+                target.targetPath,
+            ) + apkChoices.map { relativeApkPath(it) }
+            val contentWidth = (longest.maxOfOrNull { fontMetrics.stringWidth(it) } ?: PUSH_DIALOG_MIN_FIELD_WIDTH) + 80
+            return contentWidth.coerceIn(PUSH_DIALOG_MIN_FIELD_WIDTH, PUSH_DIALOG_MAX_FIELD_WIDTH)
+        }
+
+        private fun chooseLocalApk() {
+            val descriptor = FileChooserDescriptorFactory.createSingleFileDescriptor("apk")
+            val chosen = FileChooser.chooseFile(descriptor, project, null) ?: return
+            selectedApk = File(chosen.path)
+            apkCombo.selectedItem = relativeApkPath(selectedApk!!)
+            apkCombo.toolTipText = selectedApk?.absolutePath
+        }
+
+        private fun resolveSelectedApk(): File? {
+            val current = apkCombo.editor?.item?.toString()?.trim().orEmpty()
+            if (current.isNotBlank()) {
+                val typed = File(current)
+                selectedApk = if (typed.isAbsolute) typed else projectBasePath?.let { File(it, current) } ?: typed
+            }
+            return selectedApk
+        }
+
+        private fun deviceTargetComponent(): JComponent =
+            JPanel(BorderLayout()).apply {
+                targetField.toolTipText = target.detectedPath?.let { "Detected: $it" } ?: "Default path"
+                add(targetField, BorderLayout.CENTER)
+            }
+
+        override fun doOKAction() {
+            val apk = resolveSelectedApk()
+            if (apk == null || !apk.isFile) {
+                Messages.showErrorDialog("Choose a valid local APK file.", "AppPurge")
+                return
+            }
+            if (!targetField.text.trim().endsWith(".apk", ignoreCase = true)) {
+                Messages.showErrorDialog("Device Target must be a full .apk path.", "AppPurge")
+                return
+            }
+            super.doOKAction()
+        }
+
+        fun request(): SystemPushRequest =
+            SystemPushRequest(
+                serial = serial,
+                packageName = info.packageName,
+                localApk = resolveSelectedApk()!!,
+                targetPath = targetField.text.trim(),
+                removeDataOverlay = removeOverlayCheck.isSelected,
+                clearData = clearDataCheck.isSelected,
+                adb = adbPath,
+            )
     }
 
     // ── Renderers ─────────────────────────────────────────────────────────────
@@ -903,7 +1267,7 @@ class UninstallDialog(
             tbl: JTable, value: Any?, isSelected: Boolean, hasFocus: Boolean, row: Int, col: Int,
         ): Component {
             val r = tableModel.rows[row]
-            if (r is TableRow.Divider || (r is TableRow.Data && action == RowAction.REINSTALL && !r.info.isFromProject)) {
+            if (r is TableRow.Divider || (r is TableRow.Data && action.hiddenFor(r.info))) {
                 btn.isVisible = false
                 panel.background = tbl.background
                 return panel
@@ -970,6 +1334,10 @@ class UninstallDialog(
             return c
         }
     }
+
+    companion object {
+        private val pendingRebootBootIds = mutableMapOf<String, String>()
+    }
 }
 
 // ── Extension helper used in onReinstall ──────────────────────────────────────
@@ -996,7 +1364,8 @@ private fun blendColors(foreground: Color, background: Color, foregroundWeight: 
 private enum class RowAction {
     REINSTALL,
     CLEAR,
-    UNINSTALL;
+    UNINSTALL,
+    PUSH;
 
     val enabledIcon: Icon
         get() = IconLoader.getIcon("/icons/${svgName}.svg", RowAction::class.java)
@@ -1008,6 +1377,7 @@ private enum class RowAction {
         REINSTALL -> "action_reinstall"
         UNINSTALL -> "action_uninstall"
         CLEAR     -> "action_cleardata"
+        PUSH      -> "action_push"
     }
 
     val loadingTooltip: String
@@ -1015,5 +1385,11 @@ private enum class RowAction {
             REINSTALL -> "Installing..."
             CLEAR -> "Clearing data..."
             UNINSTALL -> "Uninstalling..."
+            PUSH -> "Pushing..."
         }
+
+    fun hiddenFor(info: AppInstallInfo): Boolean = when (this) {
+        REINSTALL, PUSH -> !info.isFromProject
+        CLEAR, UNINSTALL -> false
+    }
 }

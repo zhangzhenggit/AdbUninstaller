@@ -55,6 +55,13 @@ sdk.dir=C:\\Users\\xxx\\AppData\\Local\\Android\\Sdk
 - `gradle.properties` 中的 `pluginVersion`
 - `src/main/kotlin/com/lenovo/tools/apppurge/UninstallDialog.kt` 中的 `PLUGIN_VERSION` 常量
 
+每次用户要求“修改版本号并编译出包”“更新版本编译出包”或同等交付测试包需求时，必须在最终回复中明确说明：
+
+- 本次递增后的版本号
+- 已同步更新的两个版本号位置
+- `buildPlugin` 是否成功
+- 生成的 zip 包完整路径
+
 ## 开发注意事项
 
 - `AdbService` 负责封装 ADB 命令，相关操作通常涉及外部设备状态，修改后应尽量验证连接设备场景。

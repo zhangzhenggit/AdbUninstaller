@@ -15,6 +15,7 @@ data class AppInstallInfo(
     val module: Module?,          // null for device-only apps (show-all mode)
     var moduleName: String,
     val packageName: String,
+    val systemPathName: String = moduleName,
     var status: InstallStatus = InstallStatus.UNKNOWN,
     var installTimeMs: Long = 0L,
     var apkFiles: List<File> = emptyList(),

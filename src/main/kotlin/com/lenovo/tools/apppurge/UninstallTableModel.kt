@@ -117,7 +117,7 @@ class UninstallTableModel : AbstractTableModel() {
         val r = rows[row]
         return when (col) {
             COL_CHECK -> r is TableRow.Data && r.info.isUninstallable
-            COL_REINSTALL, COL_CLEAR, COL_UNINSTALL -> r is TableRow.Data
+            COL_REINSTALL, COL_CLEAR, COL_UNINSTALL, COL_PUSH -> r is TableRow.Data
             else -> false
         }
     }
@@ -128,7 +128,7 @@ class UninstallTableModel : AbstractTableModel() {
             COL_CHECK -> r.selected
             COL_APP -> r.info.moduleName.ifEmpty { r.info.packageName }
             COL_STATUS -> statusText(r.info)
-            COL_REINSTALL, COL_CLEAR, COL_UNINSTALL -> ""
+            COL_REINSTALL, COL_CLEAR, COL_UNINSTALL, COL_PUSH -> ""
             else -> ""
         }
     }
@@ -147,7 +147,8 @@ class UninstallTableModel : AbstractTableModel() {
         const val COL_REINSTALL = 3
         const val COL_CLEAR = 4
         const val COL_UNINSTALL = 5
-        val COLUMNS = arrayOf("", "App", "Status", "", "", "")
+        const val COL_PUSH = 6
+        val COLUMNS = arrayOf("", "App", "Status", "", "", "", "")
 
         private fun statusOrder(info: AppInstallInfo) = when (info.status) {
             InstallStatus.USER_APP -> 0

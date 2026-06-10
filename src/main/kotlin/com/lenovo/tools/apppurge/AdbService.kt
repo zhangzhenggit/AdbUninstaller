@@ -147,6 +147,109 @@ object AdbService {
         return CommandResult(output.contains("Success", ignoreCase = true), output.trim())
     }
 
+    fun getSystemApkTarget(serial: String, packageName: String, moduleName: String, adb: String): SystemApkTarget {
+        val paths = getPackagePaths(serial, packageName, adb)
+        val hiddenSystemPath = getHiddenSystemPackagePath(serial, packageName, adb)
+        val pmSystemPath = paths.firstOrNull(::isSystemPartitionPath)
+        val detected = hiddenSystemPath ?: pmSystemPath
+        val sanitizedModule = sanitizePathSegment(moduleName.ifBlank { packageName.substringAfterLast('.') })
+        val systemArea = detected?.let(::systemAreaFromPath) ?: "/system/app"
+        return SystemApkTarget(
+            packageName = packageName,
+            moduleName = sanitizedModule,
+            detectedPath = detected,
+            targetPath = "$systemArea/$sanitizedModule/$sanitizedModule.apk",
+            hasDataOverlay = paths.any(::isDataAppPath),
+        )
+    }
+
+    fun getBootId(serial: String, adb: String): String? =
+        shell(serial, "cat /proc/sys/kernel/random/boot_id", adb)
+            .trim()
+            .takeIf { it.matches(Regex("[0-9a-fA-F-]{16,}")) }
+
+    fun prepareRootRemount(serial: String, adb: String): RemountResult {
+        val rootOutput = exec(listOf(adb, "-s", serial, "root"), timeoutSec = 20).trim()
+        Thread.sleep(1200)
+        val remountOutput = exec(listOf(adb, "-s", serial, "remount"), timeoutSec = 45).trim()
+        val output = listOf(rootOutput, remountOutput).filter(String::isNotBlank).joinToString("\n")
+        val lower = output.lowercase()
+        val success = lower.contains("remount succeeded") ||
+                lower.contains("remounted") ||
+                lower.contains("remount succeeded")
+        val needsReboot = listOf(
+            "reboot your device",
+            "reboot the device",
+            "verity",
+            "read-only file system",
+            "remount failed",
+        ).any { lower.contains(it) }
+        return RemountResult(success = success && !lower.contains("failed"), needsReboot = needsReboot, output = output)
+    }
+
+    fun pushSystemApk(request: SystemPushRequest): SystemPushResult {
+        val targetDir = request.targetPath.substringBeforeLast('/', "")
+        if (targetDir.isBlank() || !request.targetPath.endsWith(".apk", ignoreCase = true)) {
+            return SystemPushResult(false, "validating target path", "Target path must be a full .apk path.")
+        }
+        val tmpPath = "${request.targetPath}.apppurge.tmp"
+
+        fun shellStep(step: String, command: String, timeoutSec: Long = 20): Pair<Boolean, String> {
+            val output = shell(request.serial, command, request.adb).trim()
+            val lower = output.lowercase()
+            val ok = output.isBlank() ||
+                    lower.contains("success") ||
+                    (!lower.contains("failed") && !lower.contains("read-only file system") && !lower.contains("permission denied") && !lower.contains("no such file"))
+            return ok to output.ifBlank { "$step completed" }
+        }
+
+        val mkdir = shellStep("creating target directory", "mkdir -p ${shellQuote(targetDir)}")
+        if (!mkdir.first) return SystemPushResult(false, "creating target directory", mkdir.second)
+
+        val pushOutput = exec(listOf(request.adb, "-s", request.serial, "push", request.localApk.absolutePath, tmpPath), timeoutSec = 90).trim()
+        val pushLower = pushOutput.lowercase()
+        if (pushLower.contains("failed") || pushLower.contains("error") || pushLower.contains("read-only file system") || pushLower.contains("permission denied")) {
+            return SystemPushResult(false, "pushing APK", pushOutput)
+        }
+
+        val apply = shellStep(
+            "applying APK",
+            listOf(
+                "mv ${shellQuote(tmpPath)} ${shellQuote(request.targetPath)}",
+                "chmod 644 ${shellQuote(request.targetPath)}",
+                "chown root:root ${shellQuote(request.targetPath)}",
+                "restorecon ${shellQuote(request.targetPath)} 2>/dev/null || true",
+                "sync",
+            ).joinToString(" && "),
+            timeoutSec = 30,
+        )
+        if (!apply.first) return SystemPushResult(false, "applying APK", apply.second)
+
+        var overlayRemoved = false
+        if (request.removeDataOverlay) {
+            val uninstall = uninstallPackage(request.serial, request.packageName, request.adb)
+            overlayRemoved = uninstall.success || getPackageState(request.serial, request.packageName, request.adb) == InstallStatus.SYSTEM_APP
+            if (!overlayRemoved) {
+                return SystemPushResult(false, "removing /data/app overlay", uninstall.output)
+            }
+        }
+
+        var dataCleared = false
+        if (request.clearData) {
+            val clear = clearAppData(request.serial, request.packageName, request.adb)
+            dataCleared = clear.success
+            if (!dataCleared) return SystemPushResult(false, "clearing app data", clear.output)
+        }
+
+        return SystemPushResult(
+            success = true,
+            step = "completed",
+            output = listOf(pushOutput, apply.second).filter(String::isNotBlank).joinToString("\n"),
+            dataOverlayRemoved = overlayRemoved,
+            dataCleared = dataCleared,
+        )
+    }
+
     fun clearAppData(serial: String, packageName: String, adb: String): CommandResult {
         val output = shell(serial, "pm clear $packageName", adb).trim()
         return CommandResult(output.contains("Success", ignoreCase = true), output)
@@ -199,6 +302,62 @@ object AdbService {
 
     private fun isDataAppPath(path: String): Boolean =
         path.startsWith("/data/app/")
+
+    private fun isSystemPartitionPath(path: String): Boolean =
+        listOf("/system/", "/system_ext/", "/product/", "/vendor/", "/odm/").any { path.startsWith(it) }
+
+    private fun getHiddenSystemPackagePath(serial: String, packageName: String, adb: String): String? {
+        val output = shell(serial, "dumpsys package $packageName", adb)
+        val lines = output.lines()
+        val hiddenStart = lines.indexOfFirst { it.trim() == "Hidden system packages:" }
+        if (hiddenStart < 0) return null
+
+        var inTarget = false
+        for (i in hiddenStart + 1 until lines.size) {
+            val line = lines[i]
+            val trimmed = line.trim()
+            if (trimmed.startsWith("Package [")) {
+                if (inTarget) break
+                inTarget = trimmed.startsWith("Package [$packageName]")
+                continue
+            }
+            if (!inTarget) continue
+            val path = when {
+                trimmed.startsWith("codePath=") -> trimmed.substringAfter("codePath=").trim()
+                trimmed.startsWith("resourcePath=") -> trimmed.substringAfter("resourcePath=").trim()
+                else -> null
+            }
+            if (path != null && isSystemPartitionPath(path)) return path
+        }
+        return null
+    }
+
+    fun sanitizePathSegment(value: String): String =
+        value.trim()
+            .replace(Regex("[^A-Za-z0-9._-]+"), "-")
+            .trim('-', '.', '_')
+            .ifBlank { "app" }
+
+    private fun systemAreaFromPath(path: String): String {
+        val normalized = path.trimEnd('/')
+        val markers = listOf(
+            "/system/priv-app/",
+            "/system/app/",
+            "/system_ext/priv-app/",
+            "/system_ext/app/",
+            "/product/priv-app/",
+            "/product/app/",
+            "/vendor/priv-app/",
+            "/vendor/app/",
+            "/odm/priv-app/",
+            "/odm/app/",
+        )
+        return markers.firstOrNull { normalized.startsWith(it) }?.trimEnd('/')
+            ?: normalized.substringBeforeLast('/', "/system/app")
+    }
+
+    private fun shellQuote(value: String): String =
+        "'${value.replace("'", "'\"'\"'")}'"
 
     private fun parsePackageList(output: String): Set<String> =
         output.lines()

@@ -28,6 +28,7 @@ object AppModuleScanner {
                     module = module,
                     moduleName = displayName(module),
                     packageName = pkg!!,
+                    systemPathName = systemPathName(module),
                 ) else null
             }
             .distinctBy { it.packageName }
@@ -97,4 +98,10 @@ object AppModuleScanner {
     }.getOrNull()
 
     private fun displayName(module: Module) = module.name.removeSuffix(".main")
+
+    private fun systemPathName(module: Module): String {
+        val moduleDirName = File(module.moduleFilePath).parentFile?.name
+        if (!moduleDirName.isNullOrBlank()) return moduleDirName
+        return displayName(module).substringAfterLast('.')
+    }
 }
