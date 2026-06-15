@@ -9,9 +9,9 @@ import java.io.File
 object ApkFinder {
     fun findApks(module: Module): List<File> {
         val rootPaths = ApplicationManager.getApplication().runReadAction(Computable {
-            val moduleDir = File(module.moduleFilePath).parentFile?.path
             val contentRoots = ModuleRootManager.getInstance(module).contentRoots.map { it.path }
-            (listOfNotNull(moduleDir) + contentRoots).distinct()
+            val moduleDir = File(module.moduleFilePath).parentFile?.path
+            (contentRoots + listOfNotNull(moduleDir)).distinct()
         })
 
         val primaryApks = scanApks(rootPaths.map { File(it, "build/outputs/apk") })

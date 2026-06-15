@@ -153,12 +153,16 @@ object AdbService {
         val pmSystemPath = paths.firstOrNull(::isSystemPartitionPath)
         val detected = hiddenSystemPath ?: pmSystemPath
         val sanitizedModule = sanitizePathSegment(moduleName.ifBlank { packageName.substringAfterLast('.') })
-        val systemArea = detected?.let(::systemAreaFromPath) ?: "/system/app"
+        val targetPath = when {
+            detected == null -> "/system/app/$sanitizedModule/$sanitizedModule.apk"
+            detected.endsWith(".apk", ignoreCase = true) -> detected
+            else -> "$detected/${detected.substringAfterLast('/')}.apk"
+        }
         return SystemApkTarget(
             packageName = packageName,
             moduleName = sanitizedModule,
             detectedPath = detected,
-            targetPath = "$systemArea/$sanitizedModule/$sanitizedModule.apk",
+            targetPath = targetPath,
             hasDataOverlay = paths.any(::isDataAppPath),
         )
     }
@@ -309,7 +313,10 @@ object AdbService {
     private fun getHiddenSystemPackagePath(serial: String, packageName: String, adb: String): String? {
         val output = shell(serial, "dumpsys package $packageName", adb)
         val lines = output.lines()
-        val hiddenStart = lines.indexOfFirst { it.trim() == "Hidden system packages:" }
+        val hiddenStart = lines.indexOfFirst {
+            val t = it.trim()
+            t == "Hidden system packages:" || t == "Disabled System packages:"
+        }
         if (hiddenStart < 0) return null
 
         var inTarget = false

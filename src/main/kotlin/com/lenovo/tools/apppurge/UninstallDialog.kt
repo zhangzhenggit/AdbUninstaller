@@ -27,7 +27,7 @@ import javax.swing.table.JTableHeader
 import javax.swing.table.TableCellEditor
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.61"
+private const val PLUGIN_VERSION = "1.2.63"
 private const val TOGGLE_DEFAULT = "Show All Installed Apps"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -1035,6 +1035,7 @@ class UninstallDialog(
         private val fieldWidth = preferredPushFieldWidth()
         private val targetField = JTextField(target.targetPath).apply {
             preferredSize = Dimension(fieldWidth, PUSH_DIALOG_FIELD_HEIGHT)
+            caretPosition = 0
         }
         private val removeOverlayCheck = JCheckBox("Remove /data/app overlay", true)
         private val clearDataCheck = JCheckBox("Clear app data", true)
@@ -1064,8 +1065,8 @@ class UninstallDialog(
 
             fun addField(component: JComponent) {
                 gbc.gridx = 1
-                gbc.weightx = 0.0
-                gbc.fill = GridBagConstraints.NONE
+                gbc.weightx = 1.0
+                gbc.fill = GridBagConstraints.HORIZONTAL
                 gbc.anchor = GridBagConstraints.WEST
                 panel.add(component, gbc)
                 gbc.gridy++
@@ -1146,11 +1147,10 @@ class UninstallDialog(
             return selectedApk
         }
 
-        private fun deviceTargetComponent(): JComponent =
-            JPanel(BorderLayout()).apply {
-                targetField.toolTipText = target.detectedPath?.let { "Detected: $it" } ?: "Default path"
-                add(targetField, BorderLayout.CENTER)
-            }
+        private fun deviceTargetComponent(): JComponent {
+            targetField.toolTipText = target.detectedPath?.let { "Detected: $it" } ?: "Default path"
+            return targetField
+        }
 
         override fun doOKAction() {
             val apk = resolveSelectedApk()
