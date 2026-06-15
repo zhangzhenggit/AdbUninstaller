@@ -156,7 +156,7 @@ object AdbService {
         val targetPath = when {
             detected == null -> "/system/app/$sanitizedModule/$sanitizedModule.apk"
             detected.endsWith(".apk", ignoreCase = true) -> detected
-            else -> "$detected/${detected.substringAfterLast('/')}.apk"
+            else -> "${systemAreaFromPath(detected)}/$sanitizedModule/$sanitizedModule.apk"
         }
         return SystemApkTarget(
             packageName = packageName,
@@ -203,7 +203,8 @@ object AdbService {
             val lower = output.lowercase()
             val ok = output.isBlank() ||
                     lower.contains("success") ||
-                    (!lower.contains("failed") && !lower.contains("read-only file system") && !lower.contains("permission denied") && !lower.contains("no such file"))
+                    (!lower.contains("failed") && !lower.contains("failure") && !lower.contains("read-only file system") &&
+                            !lower.contains("permission denied") && !lower.contains("operation not permitted") && !lower.contains("no such file"))
             return ok to output.ifBlank { "$step completed" }
         }
 
@@ -212,7 +213,8 @@ object AdbService {
 
         val pushOutput = exec(listOf(request.adb, "-s", request.serial, "push", request.localApk.absolutePath, tmpPath), timeoutSec = 90).trim()
         val pushLower = pushOutput.lowercase()
-        if (pushLower.contains("failed") || pushLower.contains("error") || pushLower.contains("read-only file system") || pushLower.contains("permission denied")) {
+        if (pushLower.contains("failed") || pushLower.contains("failure") || pushLower.contains("error") ||
+            pushLower.contains("read-only file system") || pushLower.contains("permission denied") || pushLower.contains("operation not permitted")) {
             return SystemPushResult(false, "pushing APK", pushOutput)
         }
 
@@ -229,12 +231,23 @@ object AdbService {
         )
         if (!apply.first) return SystemPushResult(false, "applying APK", apply.second)
 
+        val outputs = mutableListOf(pushOutput, apply.second)
+
         var overlayRemoved = false
         if (request.removeDataOverlay) {
             val uninstall = uninstallPackage(request.serial, request.packageName, request.adb)
-            overlayRemoved = uninstall.success || getPackageState(request.serial, request.packageName, request.adb) == InstallStatus.SYSTEM_APP
-            if (!overlayRemoved) {
-                return SystemPushResult(false, "removing /data/app overlay", uninstall.output)
+            if (uninstall.success) {
+                overlayRemoved = true
+            } else {
+                // Fallback: per-user uninstall handles UPDATED_SYSTEM_APP and some protected packages
+                val pmOut = shell(request.serial, "pm uninstall --user 0 ${request.packageName}", request.adb).trim()
+                if (pmOut.contains("Success", ignoreCase = true)) {
+                    overlayRemoved = true
+                } else {
+                    val stateAfter = getPackageState(request.serial, request.packageName, request.adb)
+                    overlayRemoved = stateAfter == InstallStatus.SYSTEM_APP || stateAfter == InstallStatus.NOT_INSTALLED
+                    // If still unconfirmed, treat as non-fatal — APK is already pushed to system partition
+                }
             }
         }
 
@@ -242,13 +255,13 @@ object AdbService {
         if (request.clearData) {
             val clear = clearAppData(request.serial, request.packageName, request.adb)
             dataCleared = clear.success
-            if (!dataCleared) return SystemPushResult(false, "clearing app data", clear.output)
+            if (!dataCleared) outputs += "Clear data warning: ${clear.output.ifBlank { "pm clear returned no output." }}"
         }
 
         return SystemPushResult(
             success = true,
             step = "completed",
-            output = listOf(pushOutput, apply.second).filter(String::isNotBlank).joinToString("\n"),
+            output = outputs.filter(String::isNotBlank).joinToString("\n"),
             dataOverlayRemoved = overlayRemoved,
             dataCleared = dataCleared,
         )

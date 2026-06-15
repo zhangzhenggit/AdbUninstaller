@@ -27,7 +27,7 @@ import javax.swing.table.JTableHeader
 import javax.swing.table.TableCellEditor
 import javax.swing.table.TableCellRenderer
 
-private const val PLUGIN_VERSION = "1.2.63"
+private const val PLUGIN_VERSION = "1.2.69"
 private const val TOGGLE_DEFAULT = "Show All Installed Apps"
 private const val CARD_TOGGLE = "toggle"
 private const val CARD_LOADING = "loading"
@@ -71,7 +71,9 @@ class UninstallDialog(
     private val reinstallingPackages = mutableSetOf<String>()
     private val clearingPackages = mutableSetOf<String>()
     private val uninstallingPackages = mutableSetOf<String>()
+    private val preparingPushPackages = mutableSetOf<String>()
     private val pushingPackages = mutableSetOf<String>()
+    private val pushLocks = mutableMapOf<String, Any>()
     private var actionSpinnerTimer: Timer? = null
     private var copyStatusTimer: Timer? = null
     private var pressedActionRow = -1
@@ -677,9 +679,18 @@ class UninstallDialog(
 
     private fun showPushDialog(serial: String, info: AppInstallInfo) {
         if (!isActionEnabled(RowAction.PUSH, info)) return
+        if (!preparingPushPackages.add(info.packageName)) return
+        refreshActionRendering()
         Thread {
-            val target = AdbService.getSystemApkTarget(serial, info.packageName, info.systemPathName, adbPath)
+            val targetResult = runCatching { AdbService.getSystemApkTarget(serial, info.packageName, info.systemPathName, adbPath) }
             SwingUtilities.invokeLater {
+                preparingPushPackages.remove(info.packageName)
+                refreshActionRendering()
+                if (currentSerial() != serial) return@invokeLater
+                val target = targetResult.getOrElse {
+                    Messages.showErrorDialog("Failed to resolve system APK target for ${info.packageName}.", "AppPurge")
+                    return@invokeLater
+                }
                 val dialog = PushSystemApkDialog(serial, info, target)
                 if (dialog.showAndGet()) {
                     onPushSystemApk(serial, info, dialog.request())
@@ -693,36 +704,39 @@ class UninstallDialog(
         refreshActionRendering()
         setStatus("Preparing device...")
         Thread {
-            val remount = AdbService.prepareRootRemount(serial, adbPath)
-            if (!remount.success) {
+            val pushLock = synchronized(pushLocks) { pushLocks.getOrPut(serial) { Any() } }
+            synchronized(pushLock) {
+                val remount = AdbService.prepareRootRemount(serial, adbPath)
+                if (!remount.success) {
+                    SwingUtilities.invokeLater {
+                        pushingPackages.remove(info.packageName)
+                        refreshActionRendering()
+                        setStatus("Remount failed: ${info.packageName}")
+                        showRemountFailure(serial, remount)
+                    }
+                    return@Thread
+                }
+
+                SwingUtilities.invokeLater { setStatus("Pushing APK...") }
+                val result = AdbService.pushSystemApk(request)
+                val bootId = if (result.success) AdbService.getBootId(serial, adbPath) else null
+                val newStatus = AdbService.getPackageState(serial, info.packageName, adbPath)
                 SwingUtilities.invokeLater {
                     pushingPackages.remove(info.packageName)
                     refreshActionRendering()
-                    setStatus("Remount failed: ${info.packageName}")
-                    showRemountFailure(serial, remount)
-                }
-                return@Thread
-            }
-
-            SwingUtilities.invokeLater { setStatus("Pushing APK...") }
-            val result = AdbService.pushSystemApk(request)
-            val bootId = if (result.success) AdbService.getBootId(serial, adbPath) else null
-            val newStatus = AdbService.getPackageState(serial, info.packageName, adbPath)
-            SwingUtilities.invokeLater {
-                pushingPackages.remove(info.packageName)
-                refreshActionRendering()
-                tableModel.updateRow(info.packageName, newStatus)
-                if (result.success) {
-                    if (bootId != null) pendingRebootBootIds[serial] = bootId
-                    refreshRebootRequiredState()
-                    setStatus("Push completed, reboot required")
-                    showPushSuccess(serial)
-                } else {
-                    setStatus("Push failed: ${info.packageName}")
-                    Messages.showErrorDialog(
-                        pushFailureMessage(info, request, result),
-                        "AppPurge Push Failed",
-                    )
+                    tableModel.updateRow(info.packageName, newStatus)
+                    if (result.success) {
+                        if (bootId != null) pendingRebootBootIds[serial] = bootId
+                        refreshRebootRequiredState()
+                        setStatus("Push completed, reboot required")
+                        showPushSuccess(serial, request, result)
+                    } else {
+                        setStatus("Push failed: ${info.packageName}")
+                        Messages.showErrorDialog(
+                            pushFailureMessage(info, request, result),
+                            "AppPurge Push Failed",
+                        )
+                    }
                 }
             }
         }.also { it.isDaemon = true; it.name = "AppPurge-SystemPush" }.start()
@@ -746,9 +760,18 @@ class UninstallDialog(
         if (choice == Messages.OK) rebootDevice(serial, clearPending = false)
     }
 
-    private fun showPushSuccess(serial: String) {
+    private fun showPushSuccess(serial: String, request: SystemPushRequest, result: SystemPushResult) {
+        val message = buildString {
+            append("Push completed.\nReboot is required for the system app to take effect.")
+            if (request.removeDataOverlay && !result.dataOverlayRemoved) {
+                append("\n\nWarning: /data/app overlay could not be removed. After reboot, the system version may not take effect if the user-installed overlay persists.")
+            }
+            if (request.clearData && !result.dataCleared) {
+                append("\n\nWarning: app data could not be cleared. The APK was pushed, but existing app data may remain.")
+            }
+        }
         val choice = Messages.showOkCancelDialog(
-            "Push completed.\nReboot is required for the system app to take effect.",
+            message,
             "AppPurge",
             "Reboot Now",
             "Later",
@@ -859,6 +882,7 @@ class UninstallDialog(
         in reinstallingPackages -> RowAction.REINSTALL
         in clearingPackages -> RowAction.CLEAR
         in uninstallingPackages -> RowAction.UNINSTALL
+        in preparingPushPackages -> RowAction.PUSH
         in pushingPackages -> RowAction.PUSH
         else -> null
     }
@@ -870,7 +894,7 @@ class UninstallDialog(
             RowAction.REINSTALL -> info.isFromProject && info.apkFiles.isNotEmpty()
             RowAction.CLEAR -> info.isClearDataEnabled
             RowAction.UNINSTALL -> info.isUninstallable
-            RowAction.PUSH -> info.isFromProject
+            RowAction.PUSH -> info.isFromProject && info.apkFiles.isNotEmpty()
         }
     }
 
@@ -893,7 +917,8 @@ class UninstallDialog(
     }
 
     private fun hasActiveAction(): Boolean =
-        reinstallingPackages.isNotEmpty() || clearingPackages.isNotEmpty() || uninstallingPackages.isNotEmpty() || pushingPackages.isNotEmpty()
+        reinstallingPackages.isNotEmpty() || clearingPackages.isNotEmpty() || uninstallingPackages.isNotEmpty() ||
+                preparingPushPackages.isNotEmpty() || pushingPackages.isNotEmpty()
 
     private fun appTooltip(info: AppInstallInfo): String {
         val module = info.moduleName.ifEmpty { "Device-only app" }
@@ -956,7 +981,7 @@ class UninstallDialog(
 
     private fun pushTooltip(info: AppInstallInfo): String = when {
         !info.isFromProject -> "Device-only app, cannot push"
-        info.apkFiles.isEmpty() -> "Push APK to system partition"
+        info.apkFiles.isEmpty() -> "No APK found — build first"
         else -> {
             """
                 <html>
@@ -1037,8 +1062,24 @@ class UninstallDialog(
             preferredSize = Dimension(fieldWidth, PUSH_DIALOG_FIELD_HEIGHT)
             caretPosition = 0
         }
-        private val removeOverlayCheck = JCheckBox("Remove /data/app overlay", true)
-        private val clearDataCheck = JCheckBox("Clear app data", true)
+        private val removeOverlayAllowed = info.status == InstallStatus.UPDATED_SYSTEM_APP && target.hasDataOverlay
+        private val clearDataAllowed = info.isInstalled
+        private val removeOverlayCheck = JCheckBox("Remove /data/app overlay", removeOverlayAllowed).apply {
+            isEnabled = removeOverlayAllowed
+            toolTipText = if (removeOverlayAllowed) {
+                "Remove the user-installed update so the pushed system APK can take effect after reboot"
+            } else {
+                "No updated-system-app overlay detected for this package"
+            }
+        }
+        private val clearDataCheck = JCheckBox("Clear app data", clearDataAllowed).apply {
+            isEnabled = clearDataAllowed
+            toolTipText = if (clearDataAllowed) {
+                "Clear current installed app data after pushing"
+            } else {
+                "Package is not installed on the current device user"
+            }
+        }
 
         init {
             title = "Push System APK"
@@ -1084,6 +1125,12 @@ class UninstallDialog(
 
             addLabel("Device Target:")
             addField(deviceTargetComponent())
+            gbc.gridx = 1
+            gbc.weightx = 1.0
+            gbc.fill = GridBagConstraints.HORIZONTAL
+            gbc.anchor = GridBagConstraints.WEST
+            panel.add(deviceTargetSourceLabel(), gbc)
+            gbc.gridy++
 
             gbc.gridx = 1
             gbc.weightx = 0.0
@@ -1152,6 +1199,20 @@ class UninstallDialog(
             return targetField
         }
 
+        private fun deviceTargetSourceLabel(): JComponent {
+            val text = if (target.detectedPath != null) {
+                "Target Path: detected original system path"
+            } else {
+                "Target Path: generated default path"
+            }
+            return JLabel(text).apply {
+                foreground = UIManager.getColor("Label.foreground")
+                font = font.deriveFont(font.size - 1f)
+                border = JBUI.Borders.empty(0, 2, 4, 0)
+                toolTipText = target.detectedPath?.let { "Detected: $it" } ?: "Generated from module name, not detected"
+            }
+        }
+
         override fun doOKAction() {
             val apk = resolveSelectedApk()
             if (apk == null || !apk.isFile) {
@@ -1171,8 +1232,8 @@ class UninstallDialog(
                 packageName = info.packageName,
                 localApk = resolveSelectedApk()!!,
                 targetPath = targetField.text.trim(),
-                removeDataOverlay = removeOverlayCheck.isSelected,
-                clearData = clearDataCheck.isSelected,
+                removeDataOverlay = removeOverlayCheck.isEnabled && removeOverlayCheck.isSelected,
+                clearData = clearDataCheck.isEnabled && clearDataCheck.isSelected,
                 adb = adbPath,
             )
     }
