@@ -8,12 +8,6 @@ object AdbService {
 
     private val isWindows = System.getProperty("os.name").lowercase().contains("win")
     private val adbExe = if (isWindows) "adb.exe" else "adb"
-    private const val MAX_LABEL_CACHE_SIZE = 500
-    private val labelCache = object : LinkedHashMap<String, String>(MAX_LABEL_CACHE_SIZE, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean =
-            size > MAX_LABEL_CACHE_SIZE
-    }
-
     fun adbPath(projectBasePath: String? = null): String {
         // 1. ANDROID_HOME / ANDROID_SDK_ROOT
         for (key in listOf("ANDROID_HOME", "ANDROID_SDK_ROOT")) {
@@ -55,14 +49,23 @@ object AdbService {
         return if (model.isNotBlank()) "$model ($serial)" else serial
     }
 
+    fun isDeviceOnline(serial: String, adb: String): Boolean {
+        val result = execResult(listOf(adb, "-s", serial, "get-state"), timeoutSec = 5)
+        return result.completed && result.output.trim() == "device"
+    }
+
+    fun isBootCompleted(serial: String, adb: String): Boolean =
+        shellResult(serial, "getprop sys.boot_completed", adb, timeoutSec = 5).let {
+            it.completed && it.output.trim() == "1"
+        }
+
     data class PackageSnapshot(
         val currentUser: String,
         val installedPackages: Set<String>,
-        val userPackages: Set<String>,
         val systemPackages: Set<String>,
     ) {
         val isEmpty: Boolean
-            get() = installedPackages.isEmpty() && userPackages.isEmpty() && systemPackages.isEmpty()
+            get() = installedPackages.isEmpty() && systemPackages.isEmpty()
     }
 
     fun getPackageSnapshot(serial: String, adb: String): PackageSnapshot {
@@ -70,7 +73,6 @@ object AdbService {
         return PackageSnapshot(
             currentUser = currentUser,
             installedPackages = getInstalledPackagesForUser(serial, adb, currentUser),
-            userPackages = getUserPackagesForUser(serial, adb, currentUser),
             systemPackages = getSystemPackagesForUser(serial, adb, currentUser),
         )
     }
@@ -114,35 +116,6 @@ object AdbService {
     // Returns system package names in one shot
     fun getAllSystemPackages(serial: String, adb: String): Set<String> =
         parsePackageList(shell(serial, "pm list packages -s", adb))
-
-    fun getInstallTime(serial: String, packageName: String, adb: String): Long {
-        if (!isSafePackageName(packageName)) return 0L
-        val output = shell(serial, "dumpsys package ${shellQuote(packageName)}", adb)
-        val value = output.lines()
-            .firstOrNull { it.trimStart().startsWith("lastUpdateTime=") }
-            ?.substringAfter("lastUpdateTime=")?.trim() ?: return 0L
-        return runCatching {
-            if (value.contains("-")) java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").parse(value)?.time ?: 0L
-            else value.toLong()
-        }.getOrDefault(0L)
-    }
-
-    fun getApplicationLabel(serial: String, packageName: String, adb: String): String {
-        if (!isSafePackageName(packageName)) return ""
-        val cacheKey = "$serial:$packageName"
-        synchronized(labelCache) {
-            labelCache[cacheKey]?.let { return it }
-        }
-        val output = shell(serial, "dumpsys package ${shellQuote(packageName)}", adb)
-        val label = output.lineSequence()
-            .mapNotNull(::extractNonLocalizedLabel)
-            .firstOrNull()
-            ?: getApplicationLabelFromApk(serial, packageName, adb)
-        synchronized(labelCache) {
-            labelCache[cacheKey] = label
-        }
-        return label
-    }
 
     fun uninstall(serial: String, packageName: String, adb: String): Boolean {
         return uninstallPackage(serial, packageName, adb).success
@@ -192,14 +165,30 @@ object AdbService {
     fun prepareRootRemount(serial: String, adb: String): RemountResult {
         val root = execResult(listOf(adb, "-s", serial, "root"), timeoutSec = 20)
         val rootOutput = root.output.trim()
-        Thread.sleep(1200)
+        val rootLower = rootOutput.lowercase()
+        if (!root.completed || listOf("cannot run as root", "production builds", "not allowed").any(rootLower::contains)) {
+            return RemountResult(false, false, rootOutput.ifBlank { "adb root failed." })
+        }
+
+        val waitForDevice = execResult(listOf(adb, "-s", serial, "wait-for-device"), timeoutSec = 30)
+        if (!waitForDevice.completed) {
+            return RemountResult(false, false, listOf(rootOutput, waitForDevice.output.trim(), "Device did not reconnect after adb root.")
+                .filter(String::isNotBlank).joinToString("\n"))
+        }
+        val uid = shellResult(serial, "id -u", adb, timeoutSec = 10)
+        if (!uid.completed || uid.output.trim() != "0") {
+            return RemountResult(false, false, listOf(rootOutput, uid.output.trim(), "adbd is not running as root.")
+                .filter(String::isNotBlank).joinToString("\n"))
+        }
+
         val remount = execResult(listOf(adb, "-s", serial, "remount"), timeoutSec = 45)
         val remountOutput = remount.output.trim()
         val output = listOf(rootOutput, remountOutput).filter(String::isNotBlank).joinToString("\n")
         val lower = output.lowercase()
-        val success = lower.contains("remount succeeded") ||
-                lower.contains("remounted") ||
-                lower.contains("remount succeeded")
+        val failed = listOf("failed", "failure", "permission denied", "not permitted", "read-only file system")
+            .any(lower::contains)
+        val success = remount.completed && !failed &&
+                (remountOutput.isBlank() || lower.contains("remount succeeded") || lower.contains("remounted"))
         val needsReboot = listOf(
             "reboot your device",
             "reboot the device",
@@ -207,69 +196,185 @@ object AdbService {
             "read-only file system",
             "remount failed",
         ).any { lower.contains(it) }
-        return RemountResult(success = root.completed && remount.completed && success && !lower.contains("failed"), needsReboot = needsReboot, output = output)
+        return RemountResult(success = success, needsReboot = needsReboot, output = output)
     }
 
-    fun pushSystemApk(request: SystemPushRequest): SystemPushResult {
+    fun pushSystemApk(
+        request: SystemPushRequest,
+        onProgress: (SystemPushProgress) -> Unit = {},
+    ): SystemPushResult {
         val targetDir = request.targetPath.substringBeforeLast('/', "")
-        if (targetDir.isBlank() || !request.targetPath.endsWith(".apk", ignoreCase = true)) {
-            return SystemPushResult(false, "validating target path", "Target path must be a full .apk path.")
+        val targetSegments = request.targetPath.split('/').drop(1)
+        if (targetDir.isBlank() || !request.targetPath.endsWith(".apk", ignoreCase = true) ||
+            !isSystemPartitionPath(request.targetPath) || targetSegments.any { it.isBlank() || it == "." || it == ".." } ||
+            request.targetPath.any { it.isISOControl() }) {
+            return SystemPushResult(false, "validating target path", "Target must be a full APK path under a system partition.")
         }
         if (!isSafePackageName(request.packageName)) {
             return SystemPushResult(false, "validating package name", "Invalid package name: ${request.packageName}")
         }
+        if (!request.localApk.isFile || !request.localApk.canRead() || request.localApk.length() <= 0L) {
+            return SystemPushResult(false, "validating local APK", "Local APK is missing, unreadable, or empty: ${request.localApk.absolutePath}")
+        }
         val tmpPath = "${request.targetPath}.apppurge.tmp"
 
         fun shellStep(step: String, command: String, timeoutSec: Long = 20): Pair<Boolean, String> {
-            val output = shell(request.serial, command, request.adb).trim()
-            val lower = output.lowercase()
-            val ok = output.isBlank() ||
-                    lower.contains("success") ||
-                    (!lower.contains("failed") && !lower.contains("failure") && !lower.contains("read-only file system") &&
-                            !lower.contains("permission denied") && !lower.contains("operation not permitted") && !lower.contains("no such file"))
-            return ok to output.ifBlank { "$step completed" }
+            val result = shellResult(request.serial, command, request.adb, timeoutSec)
+            val output = result.output.trim()
+            return result.completed to output.ifBlank {
+                if (result.timedOut) "$step timed out after $timeoutSec seconds." else "$step completed"
+            }
         }
 
-        val mkdir = shellStep("creating target directory", "mkdir -p ${shellQuote(targetDir)}")
+        fun report(stage: SystemPushStage, percent: Int? = null, message: String) {
+            runCatching { onProgress(SystemPushProgress(stage, percent, message)) }
+        }
+
+        fun remoteFileSize(path: String, attempts: Int = 3): Long? {
+            val quoted = shellQuote(path)
+            repeat(attempts) { attempt ->
+                val result = shellResult(
+                    request.serial,
+                    "test -f $quoted && (stat -c %s $quoted 2>/dev/null || wc -c < $quoted)",
+                    request.adb,
+                    timeoutSec = 15,
+                )
+                val size = result.output.lineSequence()
+                    .map(String::trim)
+                    .lastOrNull { it.isNotEmpty() && it.all(Char::isDigit) }
+                    ?.toLongOrNull()
+                if (result.completed && size != null) return size
+                if (attempt < attempts - 1) Thread.sleep(300)
+            }
+            return null
+        }
+
+        fun cleanupTemp() {
+            shellResult(request.serial, "rm -f ${shellQuote(tmpPath)}", request.adb, timeoutSec = 10)
+        }
+
+        fun pushWithProgress(localSize: Long, timeoutSec: Long): ExecResult = runCatching {
+            val process = ProcessBuilder(
+                request.adb,
+                "-s",
+                request.serial,
+                "push",
+                request.localApk.absolutePath,
+                tmpPath,
+            ).redirectErrorStream(true).start()
+            val output = StringBuilder()
+            val reader = Thread {
+                try { process.inputStream.bufferedReader().use { output.append(it.readText()) } } catch (_: Exception) {}
+            }.apply {
+                isDaemon = true
+                name = "AppPurge-PushOutput"
+                start()
+            }
+            val deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSec)
+            var lastPercent = -1
+            var timedOut = false
+            try {
+                while (!process.waitFor(350, TimeUnit.MILLISECONDS)) {
+                    if (System.nanoTime() >= deadlineNanos) {
+                        timedOut = true
+                        process.destroyForcibly()
+                        break
+                    }
+                    val uploadedSize = remoteFileSize(tmpPath, attempts = 1) ?: continue
+                    val percent = ((uploadedSize * 100L) / localSize).toInt().coerceIn(0, 99)
+                    if (percent != lastPercent) {
+                        lastPercent = percent
+                        report(SystemPushStage.UPLOADING, percent, "Uploading APK: $percent%")
+                    }
+                }
+            } catch (_: InterruptedException) {
+                process.destroyForcibly()
+                Thread.currentThread().interrupt()
+                reader.join(1000)
+                return ExecResult(null, output.toString().ifBlank { "Push cancelled." }, timedOut = false)
+            } catch (error: Throwable) {
+                process.destroyForcibly()
+                reader.join(1000)
+                return ExecResult(null, output.toString().ifBlank { error.message ?: error.javaClass.simpleName }, timedOut = false)
+            }
+            if (timedOut) process.waitFor(2, TimeUnit.SECONDS)
+            reader.join(2000)
+            val exitCode = if (!timedOut && !process.isAlive) process.exitValue() else null
+            ExecResult(exitCode, output.toString(), timedOut)
+        }.getOrElse { error ->
+            ExecResult(null, error.message ?: error.javaClass.simpleName, timedOut = false)
+        }
+
+        report(SystemPushStage.PREPARING, message = "Creating target directory")
+        val mkdir = shellStep("creating target directory", "mkdir -p ${shellQuote(targetDir)} && test -d ${shellQuote(targetDir)}")
         if (!mkdir.first) return SystemPushResult(false, "creating target directory", mkdir.second)
 
-        val push = execResult(listOf(request.adb, "-s", request.serial, "push", request.localApk.absolutePath, tmpPath), timeoutSec = 90)
+        val localSize = request.localApk.length()
+        val pushTimeoutSec = (localSize / (1024L * 1024L) + 60L).coerceIn(90L, 600L)
+        report(SystemPushStage.UPLOADING, 0, "Uploading APK: 0%")
+        val push = pushWithProgress(localSize, pushTimeoutSec)
         val pushOutput = push.output.trim()
-        val pushLower = pushOutput.lowercase()
-        if (!push.completed || pushLower.contains("failed") || pushLower.contains("failure") || pushLower.contains("error") ||
-            pushLower.contains("read-only file system") || pushLower.contains("permission denied") || pushLower.contains("operation not permitted")) {
-            return SystemPushResult(false, "pushing APK", pushOutput)
+        if (!push.completed) {
+            cleanupTemp()
+            return SystemPushResult(false, "pushing APK", pushOutput.ifBlank { "adb push failed with no output." })
+        }
+        val reportedSize = Regex("""\((\d+) bytes in [^)]+\)""")
+            .find(pushOutput)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toLongOrNull()
+        if (reportedSize != null && reportedSize != localSize) {
+            cleanupTemp()
+            return SystemPushResult(false, "verifying uploaded APK", "ADB reported $reportedSize bytes, local APK is $localSize bytes.")
+        }
+        report(SystemPushStage.UPLOADING, 100, "Uploading APK: 100%")
+        report(SystemPushStage.VERIFYING, 100, "Verifying uploaded APK")
+        val temporarySize = remoteFileSize(tmpPath)
+        if (temporarySize != null && temporarySize != localSize) {
+            cleanupTemp()
+            return SystemPushResult(false, "verifying uploaded APK", "Size mismatch: local=$localSize bytes, device=$temporarySize.")
         }
 
+        report(SystemPushStage.APPLYING, 100, "Applying APK and permissions")
         val apply = shellStep(
             "applying APK",
             listOf(
-                "mv ${shellQuote(tmpPath)} ${shellQuote(request.targetPath)}",
+                "mv -f ${shellQuote(tmpPath)} ${shellQuote(request.targetPath)}",
                 "chmod 644 ${shellQuote(request.targetPath)}",
-                "chown root:root ${shellQuote(request.targetPath)}",
-                "restorecon ${shellQuote(request.targetPath)} 2>/dev/null || true",
+                "chown 0:0 ${shellQuote(request.targetPath)}",
+                "(restorecon ${shellQuote(request.targetPath)} 2>/dev/null || true)",
                 "sync",
+                "test -s ${shellQuote(request.targetPath)}",
             ).joinToString(" && "),
             timeoutSec = 30,
         )
-        if (!apply.first) return SystemPushResult(false, "applying APK", apply.second)
+        if (!apply.first) {
+            cleanupTemp()
+            return SystemPushResult(false, "applying APK", apply.second)
+        }
+        val installedSize = remoteFileSize(request.targetPath)
+        if (installedSize != null && installedSize != localSize) {
+            return SystemPushResult(false, "verifying installed APK", "Size mismatch: local=$localSize bytes, device=$installedSize.")
+        }
 
         val outputs = mutableListOf(pushOutput, apply.second)
 
         var overlayRemoved = false
+        report(SystemPushStage.CLEANING, 100, "Finishing package cleanup")
         if (request.removeDataOverlay) {
             val uninstall = uninstallPackage(request.serial, request.packageName, request.adb)
             if (uninstall.success) {
                 overlayRemoved = true
             } else {
                 // Fallback: per-user uninstall handles UPDATED_SYSTEM_APP and some protected packages
-                val pmOut = shell(request.serial, "pm uninstall --user 0 ${shellQuote(request.packageName)}", request.adb).trim()
+                val currentUser = getCurrentUser(request.serial, request.adb)
+                val pmOut = shell(request.serial, "pm uninstall --user $currentUser ${shellQuote(request.packageName)}", request.adb).trim()
                 if (pmOut.contains("Success", ignoreCase = true)) {
                     overlayRemoved = true
                 } else {
                     val stateAfter = getPackageState(request.serial, request.packageName, request.adb)
                     overlayRemoved = stateAfter == InstallStatus.SYSTEM_APP || stateAfter == InstallStatus.NOT_INSTALLED
-                    // If still unconfirmed, treat as non-fatal — APK is already pushed to system partition
+                    if (!overlayRemoved) outputs += "Overlay removal warning: ${pmOut.ifBlank { uninstall.output.ifBlank { "Unable to confirm overlay removal." } }}"
                 }
             }
         }
@@ -280,6 +385,8 @@ object AdbService {
             dataCleared = clear.success
             if (!dataCleared) outputs += "Clear data warning: ${clear.output.ifBlank { "pm clear returned no output." }}"
         }
+
+        report(SystemPushStage.COMPLETED, 100, "Push completed")
 
         return SystemPushResult(
             success = true,
@@ -297,14 +404,6 @@ object AdbService {
         return CommandResult(result.completed && output.contains("Success", ignoreCase = true), output)
     }
 
-    fun getAllUserPackages(serial: String, adb: String): List<String> {
-        val output = shell(serial, "pm list packages -3", adb)
-        return output.lines()
-            .filter { it.startsWith("package:") }
-            .map { it.removePrefix("package:").trim() }
-            .filter { it.isNotBlank() }
-    }
-
     fun getCurrentUser(serial: String, adb: String): String {
         val cmdUser = shell(serial, "cmd activity get-current-user", adb).trim()
         if (cmdUser.isNotBlank() && cmdUser.all(Char::isDigit)) return cmdUser
@@ -312,10 +411,6 @@ object AdbService {
         if (amUser.isNotBlank() && amUser.all(Char::isDigit)) return amUser
         return "0"
     }
-
-    private fun getUserPackagesForUser(serial: String, adb: String, user: String): Set<String> =
-        listPackagesForUser(serial, adb, user, listOf("-3"))
-            .ifEmpty { getAllUserPackages(serial, adb).toSet() }
 
     private fun listPackagesForUser(serial: String, adb: String, user: String, flags: List<String>): Set<String> {
         val cmdOutput = shell(serial, packageListCommand("cmd package list packages", user, flags), adb)
@@ -412,99 +507,11 @@ object AdbService {
             .filter { it.isNotBlank() }
             .toSet()
 
-    private fun extractNonLocalizedLabel(line: String): String? {
-        if (!line.contains("nonLocalizedLabel=")) return null
-        val raw = line.substringAfter("nonLocalizedLabel=")
-            .substringBefore(" icon=")
-            .substringBefore(" banner=")
-            .substringBefore(" logo=")
-            .trim()
-            .trim('"', '\'')
-        return raw.takeIf { it.isNotBlank() && it != "null" && it != "0x0" }
-    }
-
-    private fun getApplicationLabelFromApk(serial: String, packageName: String, adb: String): String {
-        if (!isSafePackageName(packageName)) return ""
-        val aapt = findAapt(adb) ?: return ""
-        val remoteApk = getPackageBaseApkPath(serial, packageName, adb) ?: return ""
-        val localApk = File.createTempFile("apppurge-${packageName.replace(Regex("[^A-Za-z0-9._-]"), "_")}-", ".apk")
-        return try {
-            val pullOutput = exec(listOf(adb, "-s", serial, "pull", remoteApk, localApk.absolutePath), timeoutSec = 45)
-            if (!pullOutput.contains("pulled", ignoreCase = true) && localApk.length() == 0L) return ""
-            val badging = exec(listOf(aapt.absolutePath, "dump", "badging", localApk.absolutePath), timeoutSec = 20)
-            chooseLocalizedLabel(badging, getDeviceLocale(serial, adb))
-        } finally {
-            runCatching { localApk.delete() }
-        }
-    }
-
-    private fun getPackageBaseApkPath(serial: String, packageName: String, adb: String): String? =
-        if (!isSafePackageName(packageName)) null else shell(serial, "pm path ${shellQuote(packageName)}", adb)
-            .lineSequence()
-            .filter { it.startsWith("package:") }
-            .map { it.removePrefix("package:").trim() }
-            .filter { it.isNotBlank() }
-            .sortedWith(compareByDescending<String> { it.endsWith("/base.apk") || it.endsWith("base.apk") }.thenBy { it })
-            .firstOrNull()
-
-    private fun getDeviceLocale(serial: String, adb: String): String {
-        val locale = shell(serial, "getprop persist.sys.locale", adb).trim()
-            .ifBlank { shell(serial, "getprop ro.product.locale", adb).trim() }
-        if (locale.isNotBlank()) return locale
-        val language = shell(serial, "getprop persist.sys.language", adb).trim()
-        val country = shell(serial, "getprop persist.sys.country", adb).trim()
-        return listOf(language, country).filter { it.isNotBlank() }.joinToString("-")
-    }
-
-    private fun findAapt(adb: String): File? {
-        val sdkCandidates = sequenceOf(
-            System.getenv("ANDROID_HOME"),
-            System.getenv("ANDROID_SDK_ROOT"),
-            File(adb).takeIf { it.exists() }?.parentFile?.parentFile?.absolutePath,
-        ).filterNotNull()
-            .map { File(it) }
-            .filter { it.exists() }
-            .distinctBy { it.absolutePath }
-
-        val names = if (isWindows) listOf("aapt2.exe", "aapt.exe") else listOf("aapt2", "aapt")
-        return sdkCandidates.flatMap { sdk ->
-            val buildTools = File(sdk, "build-tools")
-            if (!buildTools.exists()) emptySequence() else buildTools.listFiles()
-                ?.asSequence()
-                ?.filter { it.isDirectory }
-                ?.sortedByDescending { it.name }
-                ?.flatMap { versionDir -> names.asSequence().map { File(versionDir, it) } }
-                ?: emptySequence()
-        }.firstOrNull { it.exists() && it.canExecute() }
-    }
-
-    private fun chooseLocalizedLabel(badging: String, locale: String): String {
-        val labels = linkedMapOf<String, String>()
-        val regex = Regex("""^application-label(?:-([^:]+))?:'(.+)'$""")
-        badging.lineSequence().forEach { line ->
-            val match = regex.find(line.trim()) ?: return@forEach
-            labels[match.groupValues.getOrNull(1).orEmpty()] = match.groupValues[2]
-        }
-        if (labels.isEmpty()) return ""
-
-        val normalized = locale.replace('_', '-')
-        val parts = normalized.split('-').filter { it.isNotBlank() }
-        val candidates = buildList {
-            if (normalized.isNotBlank()) add(normalized)
-            if (parts.size >= 2) add("${parts[0]}-${parts[1]}")
-            if (parts.isNotEmpty()) add(parts[0])
-            add("")
-        }
-        return candidates.firstNotNullOfOrNull { candidate ->
-            labels.entries.firstOrNull { it.key.equals(candidate, ignoreCase = true) }?.value
-        } ?: labels[""] ?: labels.values.first()
-    }
-
     private fun shell(serial: String, command: String, adb: String): String =
         shellResult(serial, command, adb).output
 
-    private fun shellResult(serial: String, command: String, adb: String): ExecResult =
-        execResult(listOf(adb, "-s", serial, "shell", command))
+    private fun shellResult(serial: String, command: String, adb: String, timeoutSec: Long = 15): ExecResult =
+        execResult(listOf(adb, "-s", serial, "shell", command), timeoutSec)
 
     // Reads stdout on a daemon thread so we never block forever on hung processes.
     fun exec(cmd: List<String>, timeoutSec: Long = 15): String =
@@ -518,7 +525,14 @@ object AdbService {
         }
         reader.isDaemon = true
         reader.start()
-        val finished = process.waitFor(timeoutSec, TimeUnit.SECONDS)
+        val finished = try {
+            process.waitFor(timeoutSec, TimeUnit.SECONDS)
+        } catch (_: InterruptedException) {
+            process.destroyForcibly()
+            reader.join(1000)
+            Thread.currentThread().interrupt()
+            return ExecResult(exitCode = null, output = sb.toString().ifBlank { "Command cancelled." }, timedOut = false)
+        }
         val exitCode = if (finished) process.exitValue() else null
         if (!finished) {
             process.destroyForcibly()

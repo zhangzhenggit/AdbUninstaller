@@ -28,6 +28,22 @@ data class SystemPushResult(
     val dataCleared: Boolean = false,
 )
 
+enum class SystemPushStage {
+    PREPARING,
+    UPLOADING,
+    VERIFYING,
+    APPLYING,
+    CLEANING,
+    COMPLETED,
+    FAILED,
+}
+
+data class SystemPushProgress(
+    val stage: SystemPushStage,
+    val percent: Int? = null,
+    val message: String,
+)
+
 data class RemountResult(
     val success: Boolean,
     val needsReboot: Boolean,

@@ -12,12 +12,11 @@ enum class InstallStatus {
 }
 
 data class AppInstallInfo(
-    val module: Module?,          // null for device-only apps (show-all mode)
+    val module: Module,
     var moduleName: String,
     val packageName: String,
     val systemPathName: String = moduleName,
     var status: InstallStatus = InstallStatus.UNKNOWN,
-    var installTimeMs: Long = 0L,
     var apkFiles: List<File> = emptyList(),
     var activeApkPaths: List<String> = emptyList(),
 ) {
@@ -33,11 +32,4 @@ data class AppInstallInfo(
     val isClearDataEnabled: Boolean
         get() = isInstalled
 
-    val isFromProject: Boolean
-        get() = module != null
-
-    val installTimeDisplay: String
-        get() = if (installTimeMs > 0L)
-            java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(java.util.Date(installTimeMs))
-        else "-"
 }

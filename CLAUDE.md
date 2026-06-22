@@ -57,7 +57,7 @@ AdbUninstallerAction（工具栏/菜单点击）
 | `AdbService` | 所有 ADB 命令的封装（安装/卸载/清数据/包名查询等），同步执行，带超时 |
 | `ApkFinder` | 在模块 `build/outputs/apk` 目录下查找最新构建产物 |
 | `AppInstallInfo` | 数据模型，持有模块引用、包名、安装状态、APK 文件列表 |
-| `UninstallTableModel` | 表格数据模型，维护 project 条目与 device-only 条目，用 `TableRow.Divider` 分隔两区 |
+| `UninstallTableModel` | 表格数据模型，仅维护当前工程 application module，并按模块名称稳定排序 |
 | `UninstallDialog` | 主对话框，包含全部 UI 构建、事件处理、行渲染器 `UniversalRenderer` |
 
 ### UninstallDialog 内部设计要点
@@ -66,9 +66,9 @@ AdbUninstallerAction（工具栏/菜单点击）
 
 **点击态实现**：`actionPanel` 是一个匿名 `JPanel` 子类，重写 `paintComponent` 在按压按钮的坐标上绘制圆角矩形高亮。坐标计算公式与 `actionAt()` 方法完全一致，保证视觉反馈与点击判定区域同步。不使用 `model.isPressed` / `isContentAreaFilled` 等 JButton 状态，因为在 renderer 上下文中不可靠。
 
-**两区数据**：`UninstallTableModel` 将"工程模块"与"仅设备安装"的 app 分为两段存储（`projectItems` / `deviceItems`），中间插入 `TableRow.Divider` 行，`UninstallDialog.paintComponent` 在 Divider 行中央绘制分隔线。
+**模块数据**：`UninstallTableModel` 只展示当前工程的 application module，不管理设备上的非项目应用；模块行按名称稳定排序，设备安装状态变化不会改变顺序。
 
-**ADB 操作线程模型**：所有 ADB 调用在 daemon 线程中执行，结果通过 `SwingUtilities.invokeLater` 回到 EDT 更新 UI。`nameResolveRunId`（`AtomicInteger`）用于取消后台批量名称解析。
+**ADB 操作线程模型**：所有 ADB 调用在 daemon 线程中执行，结果通过 `SwingUtilities.invokeLater` 回到 EDT 更新 UI。
 
 ### 图标资源
 
