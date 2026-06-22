@@ -57,6 +57,16 @@ class UninstallTableModel : AbstractTableModel() {
         if (idx >= 0) fireTableCellUpdated(idx, COL_APP)
     }
 
+    fun updateActiveApkPaths(packageName: String, paths: List<String>) {
+        val info = rows.filterIsInstance<TableRow.Data>().firstOrNull { it.info.packageName == packageName }?.info
+            ?: (projectItems + deviceItems).firstOrNull { it.packageName == packageName }
+            ?: return
+        if (info.activeApkPaths == paths) return
+        info.activeApkPaths = paths
+        val idx = rows.indexOfFirst { it is TableRow.Data && it.info.packageName == packageName }
+        if (idx >= 0) fireTableCellUpdated(idx, COL_STATUS)
+    }
+
     private fun rebuildRows() {
         rows.clear()
 
@@ -72,7 +82,12 @@ class UninstallTableModel : AbstractTableModel() {
         fireTableDataChanged()
     }
 
-    fun updateRow(packageName: String, newStatus: InstallStatus, installTimeMs: Long = 0L) {
+    fun updateRow(
+        packageName: String,
+        newStatus: InstallStatus,
+        installTimeMs: Long = 0L,
+        activeApkPaths: List<String>? = null,
+    ) {
         val idx = rows.indexOfFirst { it is TableRow.Data && it.info.packageName == packageName }
         val info = rows.filterIsInstance<TableRow.Data>().firstOrNull { it.info.packageName == packageName }?.info
             ?: (projectItems + deviceItems).firstOrNull { it.packageName == packageName }
@@ -80,6 +95,7 @@ class UninstallTableModel : AbstractTableModel() {
         info.let {
             it.status = newStatus
             if (installTimeMs > 0L) it.installTimeMs = installTimeMs
+            if (activeApkPaths != null) it.activeApkPaths = activeApkPaths
         }
         if (idx >= 0) {
             (rows[idx] as TableRow.Data).selected = false

@@ -19,6 +19,7 @@ data class AppInstallInfo(
     var status: InstallStatus = InstallStatus.UNKNOWN,
     var installTimeMs: Long = 0L,
     var apkFiles: List<File> = emptyList(),
+    var activeApkPaths: List<String> = emptyList(),
 ) {
     val isInstalled: Boolean
         get() = status == InstallStatus.USER_APP ||

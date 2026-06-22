@@ -8,7 +8,11 @@ object AdbService {
 
     private val isWindows = System.getProperty("os.name").lowercase().contains("win")
     private val adbExe = if (isWindows) "adb.exe" else "adb"
-    private val labelCache = mutableMapOf<String, String>()
+    private const val MAX_LABEL_CACHE_SIZE = 500
+    private val labelCache = object : LinkedHashMap<String, String>(MAX_LABEL_CACHE_SIZE, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean =
+            size > MAX_LABEL_CACHE_SIZE
+    }
 
     fun adbPath(projectBasePath: String? = null): String {
         // 1. ANDROID_HOME / ANDROID_SDK_ROOT
@@ -100,6 +104,9 @@ object AdbService {
         return if (paths.any(::isDataAppPath)) InstallStatus.UPDATED_SYSTEM_APP else InstallStatus.SYSTEM_APP
     }
 
+    fun getActivePackagePaths(serial: String, packageName: String, adb: String): List<String> =
+        getPackagePaths(serial, packageName, adb)
+
     // Returns ALL installed package names in one shot
     fun getAllInstalledPackages(serial: String, adb: String): Set<String> =
         parsePackageList(shell(serial, "pm list packages", adb))
@@ -109,7 +116,8 @@ object AdbService {
         parsePackageList(shell(serial, "pm list packages -s", adb))
 
     fun getInstallTime(serial: String, packageName: String, adb: String): Long {
-        val output = shell(serial, "dumpsys package $packageName", adb)
+        if (!isSafePackageName(packageName)) return 0L
+        val output = shell(serial, "dumpsys package ${shellQuote(packageName)}", adb)
         val value = output.lines()
             .firstOrNull { it.trimStart().startsWith("lastUpdateTime=") }
             ?.substringAfter("lastUpdateTime=")?.trim() ?: return 0L
@@ -120,14 +128,19 @@ object AdbService {
     }
 
     fun getApplicationLabel(serial: String, packageName: String, adb: String): String {
+        if (!isSafePackageName(packageName)) return ""
         val cacheKey = "$serial:$packageName"
-        labelCache[cacheKey]?.let { return it }
-        val output = shell(serial, "dumpsys package $packageName", adb)
+        synchronized(labelCache) {
+            labelCache[cacheKey]?.let { return it }
+        }
+        val output = shell(serial, "dumpsys package ${shellQuote(packageName)}", adb)
         val label = output.lineSequence()
             .mapNotNull(::extractNonLocalizedLabel)
             .firstOrNull()
             ?: getApplicationLabelFromApk(serial, packageName, adb)
-        labelCache[cacheKey] = label
+        synchronized(labelCache) {
+            labelCache[cacheKey] = label
+        }
         return label
     }
 
@@ -138,16 +151,20 @@ object AdbService {
     data class CommandResult(val success: Boolean, val output: String)
 
     fun uninstallPackage(serial: String, packageName: String, adb: String): CommandResult {
-        val output = exec(listOf(adb, "-s", serial, "uninstall", packageName)).trim()
-        return CommandResult(output.contains("Success", ignoreCase = true), output)
+        if (!isSafePackageName(packageName)) return CommandResult(false, "Invalid package name: $packageName")
+        val result = execResult(listOf(adb, "-s", serial, "uninstall", packageName))
+        val output = result.output.trim()
+        return CommandResult(result.completed && output.contains("Success", ignoreCase = true), output)
     }
 
     fun installApk(serial: String, apkPath: String, adb: String): CommandResult {
-        val output = exec(listOf(adb, "-s", serial, "install", "-r", "-t", apkPath), timeoutSec = 60)
-        return CommandResult(output.contains("Success", ignoreCase = true), output.trim())
+        val result = execResult(listOf(adb, "-s", serial, "install", "-r", "-t", apkPath), timeoutSec = 60)
+        val output = result.output.trim()
+        return CommandResult(result.completed && output.contains("Success", ignoreCase = true), output)
     }
 
     fun getSystemApkTarget(serial: String, packageName: String, moduleName: String, adb: String): SystemApkTarget {
+        require(isSafePackageName(packageName)) { "Invalid package name: $packageName" }
         val paths = getPackagePaths(serial, packageName, adb)
         val hiddenSystemPath = getHiddenSystemPackagePath(serial, packageName, adb)
         val pmSystemPath = paths.firstOrNull(::isSystemPartitionPath)
@@ -173,9 +190,11 @@ object AdbService {
             .takeIf { it.matches(Regex("[0-9a-fA-F-]{16,}")) }
 
     fun prepareRootRemount(serial: String, adb: String): RemountResult {
-        val rootOutput = exec(listOf(adb, "-s", serial, "root"), timeoutSec = 20).trim()
+        val root = execResult(listOf(adb, "-s", serial, "root"), timeoutSec = 20)
+        val rootOutput = root.output.trim()
         Thread.sleep(1200)
-        val remountOutput = exec(listOf(adb, "-s", serial, "remount"), timeoutSec = 45).trim()
+        val remount = execResult(listOf(adb, "-s", serial, "remount"), timeoutSec = 45)
+        val remountOutput = remount.output.trim()
         val output = listOf(rootOutput, remountOutput).filter(String::isNotBlank).joinToString("\n")
         val lower = output.lowercase()
         val success = lower.contains("remount succeeded") ||
@@ -188,13 +207,16 @@ object AdbService {
             "read-only file system",
             "remount failed",
         ).any { lower.contains(it) }
-        return RemountResult(success = success && !lower.contains("failed"), needsReboot = needsReboot, output = output)
+        return RemountResult(success = root.completed && remount.completed && success && !lower.contains("failed"), needsReboot = needsReboot, output = output)
     }
 
     fun pushSystemApk(request: SystemPushRequest): SystemPushResult {
         val targetDir = request.targetPath.substringBeforeLast('/', "")
         if (targetDir.isBlank() || !request.targetPath.endsWith(".apk", ignoreCase = true)) {
             return SystemPushResult(false, "validating target path", "Target path must be a full .apk path.")
+        }
+        if (!isSafePackageName(request.packageName)) {
+            return SystemPushResult(false, "validating package name", "Invalid package name: ${request.packageName}")
         }
         val tmpPath = "${request.targetPath}.apppurge.tmp"
 
@@ -211,9 +233,10 @@ object AdbService {
         val mkdir = shellStep("creating target directory", "mkdir -p ${shellQuote(targetDir)}")
         if (!mkdir.first) return SystemPushResult(false, "creating target directory", mkdir.second)
 
-        val pushOutput = exec(listOf(request.adb, "-s", request.serial, "push", request.localApk.absolutePath, tmpPath), timeoutSec = 90).trim()
+        val push = execResult(listOf(request.adb, "-s", request.serial, "push", request.localApk.absolutePath, tmpPath), timeoutSec = 90)
+        val pushOutput = push.output.trim()
         val pushLower = pushOutput.lowercase()
-        if (pushLower.contains("failed") || pushLower.contains("failure") || pushLower.contains("error") ||
+        if (!push.completed || pushLower.contains("failed") || pushLower.contains("failure") || pushLower.contains("error") ||
             pushLower.contains("read-only file system") || pushLower.contains("permission denied") || pushLower.contains("operation not permitted")) {
             return SystemPushResult(false, "pushing APK", pushOutput)
         }
@@ -240,7 +263,7 @@ object AdbService {
                 overlayRemoved = true
             } else {
                 // Fallback: per-user uninstall handles UPDATED_SYSTEM_APP and some protected packages
-                val pmOut = shell(request.serial, "pm uninstall --user 0 ${request.packageName}", request.adb).trim()
+                val pmOut = shell(request.serial, "pm uninstall --user 0 ${shellQuote(request.packageName)}", request.adb).trim()
                 if (pmOut.contains("Success", ignoreCase = true)) {
                     overlayRemoved = true
                 } else {
@@ -268,8 +291,10 @@ object AdbService {
     }
 
     fun clearAppData(serial: String, packageName: String, adb: String): CommandResult {
-        val output = shell(serial, "pm clear $packageName", adb).trim()
-        return CommandResult(output.contains("Success", ignoreCase = true), output)
+        if (!isSafePackageName(packageName)) return CommandResult(false, "Invalid package name: $packageName")
+        val result = shellResult(serial, "pm clear ${shellQuote(packageName)}", adb)
+        val output = result.output.trim()
+        return CommandResult(result.completed && output.contains("Success", ignoreCase = true), output)
     }
 
     fun getAllUserPackages(serial: String, adb: String): List<String> {
@@ -310,7 +335,7 @@ object AdbService {
             .joinToString(" ")
 
     private fun getPackagePaths(serial: String, packageName: String, adb: String): List<String> =
-        shell(serial, "pm path $packageName", adb)
+        if (!isSafePackageName(packageName)) emptyList() else shell(serial, "pm path ${shellQuote(packageName)}", adb)
             .lineSequence()
             .filter { it.startsWith("package:") }
             .map { it.removePrefix("package:").trim() }
@@ -324,7 +349,8 @@ object AdbService {
         listOf("/system/", "/system_ext/", "/product/", "/vendor/", "/odm/").any { path.startsWith(it) }
 
     private fun getHiddenSystemPackagePath(serial: String, packageName: String, adb: String): String? {
-        val output = shell(serial, "dumpsys package $packageName", adb)
+        if (!isSafePackageName(packageName)) return null
+        val output = shell(serial, "dumpsys package ${shellQuote(packageName)}", adb)
         val lines = output.lines()
         val hiddenStart = lines.indexOfFirst {
             val t = it.trim()
@@ -398,6 +424,7 @@ object AdbService {
     }
 
     private fun getApplicationLabelFromApk(serial: String, packageName: String, adb: String): String {
+        if (!isSafePackageName(packageName)) return ""
         val aapt = findAapt(adb) ?: return ""
         val remoteApk = getPackageBaseApkPath(serial, packageName, adb) ?: return ""
         val localApk = File.createTempFile("apppurge-${packageName.replace(Regex("[^A-Za-z0-9._-]"), "_")}-", ".apk")
@@ -412,7 +439,7 @@ object AdbService {
     }
 
     private fun getPackageBaseApkPath(serial: String, packageName: String, adb: String): String? =
-        shell(serial, "pm path $packageName", adb)
+        if (!isSafePackageName(packageName)) null else shell(serial, "pm path ${shellQuote(packageName)}", adb)
             .lineSequence()
             .filter { it.startsWith("package:") }
             .map { it.removePrefix("package:").trim() }
@@ -474,10 +501,16 @@ object AdbService {
     }
 
     private fun shell(serial: String, command: String, adb: String): String =
-        exec(listOf(adb, "-s", serial, "shell", command))
+        shellResult(serial, command, adb).output
+
+    private fun shellResult(serial: String, command: String, adb: String): ExecResult =
+        execResult(listOf(adb, "-s", serial, "shell", command))
 
     // Reads stdout on a daemon thread so we never block forever on hung processes.
-    fun exec(cmd: List<String>, timeoutSec: Long = 15): String = runCatching {
+    fun exec(cmd: List<String>, timeoutSec: Long = 15): String =
+        execResult(cmd, timeoutSec).output
+
+    fun execResult(cmd: List<String>, timeoutSec: Long = 15): ExecResult = runCatching {
         val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
         val sb = StringBuilder()
         val reader = Thread {
@@ -486,12 +519,27 @@ object AdbService {
         reader.isDaemon = true
         reader.start()
         val finished = process.waitFor(timeoutSec, TimeUnit.SECONDS)
+        val exitCode = if (finished) process.exitValue() else null
         if (!finished) {
             process.destroyForcibly()
             reader.join(2000)
         } else {
             reader.join(timeoutSec * 500)
         }
-        sb.toString()
-    }.getOrDefault("")
+        ExecResult(exitCode = exitCode, output = sb.toString(), timedOut = !finished)
+    }.getOrElse { e ->
+        ExecResult(exitCode = null, output = e.message ?: e.javaClass.simpleName, timedOut = false)
+    }
+
+    data class ExecResult(
+        val exitCode: Int?,
+        val output: String,
+        val timedOut: Boolean,
+    ) {
+        val completed: Boolean
+            get() = !timedOut && exitCode == 0
+    }
+
+    private fun isSafePackageName(value: String): Boolean =
+        value.matches(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+"))
 }

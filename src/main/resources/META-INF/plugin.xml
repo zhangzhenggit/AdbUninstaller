@@ -4,9 +4,10 @@
     <vendor>zheng</vendor>
 
     <description><![CDATA[
-    Scans all application modules in the current Android project, detects their installation
-    status on connected ADB devices, and provides single or batch uninstall via a dialog.
-    Handles pre-installed system APKs that become uninstallable after a debug overlay install.
+    Scans Android application modules in the current project, detects their installation
+    status on connected ADB devices, and provides install, uninstall, clear-data, and
+    system APK push actions from a dialog. Handles pre-installed system APKs that become
+    uninstallable after a debug overlay install.
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
@@ -20,7 +21,7 @@
         <action id="com.lenovo.tools.apppurge.AdbUninstallerAction"
                 class="com.lenovo.tools.apppurge.AdbUninstallerAction"
                 text="AppPurge"
-                description="Scan app modules and uninstall APKs from connected device via ADB"
+                description="Manage project APKs on connected ADB devices"
                 icon="/icons/apppurge.svg">
             <!-- New UI run toolbar when the IDE exposes the run toolbar action group. -->
             <add-to-group group-id="RunToolbarActionsGroup" anchor="before" relative-to-action="RunToolbarMoreActionGroup"/>

@@ -7,7 +7,7 @@ import com.intellij.openapi.util.Computable
 import java.io.File
 
 object ApkFinder {
-    fun findApks(module: Module): List<File> {
+    fun findApks(module: Module, expectedPackageName: String): List<File> {
         val (contentRoots, moduleDir) = ApplicationManager.getApplication().runReadAction(Computable {
             val cr = ModuleRootManager.getInstance(module).contentRoots.map { it.path }
             val md = File(module.moduleFilePath).parentFile?.path
@@ -26,9 +26,9 @@ object ApkFinder {
             .map { File(it) }
 
         val primaryApks = scanApks(allRoots.map { File(it, "build/outputs/apk") })
-        if (primaryApks.isNotEmpty()) return primaryApks
+        if (primaryApks.isNotEmpty()) return filterByPackageName(primaryApks, expectedPackageName)
 
-        return scanApks(allRoots.map { File(it, "build/intermediates/apk") })
+        return filterByPackageName(scanApks(allRoots.map { File(it, "build/intermediates/apk") }), expectedPackageName)
     }
 
     // Walk up from startPath until a build.gradle(.kts) is found — that directory is the module root.
@@ -50,5 +50,22 @@ object ApkFinder {
             .distinctBy { it.absolutePath }
             .sortedByDescending { it.lastModified() }
             .toList()
+    }
+
+    private fun filterByPackageName(apks: List<File>, expectedPackageName: String): List<File> {
+        if (expectedPackageName.isBlank() || apks.size <= 1) return apks
+        val matched = apks.filter { apkPackageNameFromMetadata(it) == expectedPackageName }
+        return matched.ifEmpty { apks }
+    }
+
+    private fun apkPackageNameFromMetadata(apk: File): String? {
+        val metadata = File(apk.parentFile ?: return null, "output-metadata.json")
+        if (!metadata.isFile) return null
+        val text = runCatching { metadata.readText() }.getOrNull() ?: return null
+        if (!Regex(""""outputFile"\s*:\s*"${Regex.escape(apk.name)}"""").containsMatchIn(text)) return null
+        return Regex(""""applicationId"\s*:\s*"([^"]+)"""")
+            .find(text)
+            ?.groupValues
+            ?.get(1)
     }
 }

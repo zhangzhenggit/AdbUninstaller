@@ -52,8 +52,9 @@ object AppModuleScanner {
             File(moduleDir, "build.gradle.kts"),
             File(moduleDir, "build.gradle"),
         ).firstOrNull { it.exists() } ?: return true
-        val text = runCatching { buildFile.readText() }.getOrDefault("")
-        return text.contains("com.android.application")
+        val text = stripLineComments(runCatching { buildFile.readText() }.getOrDefault(""))
+        return Regex("""id\s*\(?\s*["']com\.android\.application["']\s*\)?""").containsMatchIn(text) ||
+                Regex("""com\.android\.application""").containsMatchIn(text)
     }
 
     private fun resolvePackageName(module: Module): String? {
@@ -94,7 +95,10 @@ object AppModuleScanner {
             File(dir, "build.gradle.kts"),
             File(dir, "build.gradle"),
         ).firstOrNull { it.exists() } ?: return null
-        Regex("""applicationId\s*[=:]\s*["']([^"']+)["']""").find(buildFile.readText())?.groupValues?.get(1)
+        Regex("""applicationId\s*(?:=|\(|\s)\s*["']([^"']+)["']\)?""")
+            .find(stripLineComments(buildFile.readText()))
+            ?.groupValues
+            ?.get(1)
     }.getOrNull()
 
     private fun displayName(module: Module) = module.name.removeSuffix(".main")
@@ -104,4 +108,9 @@ object AppModuleScanner {
         if (!moduleDirName.isNullOrBlank()) return moduleDirName
         return displayName(module).substringAfterLast('.')
     }
+
+    private fun stripLineComments(text: String): String =
+        text.lineSequence()
+            .map { it.substringBefore("//") }
+            .joinToString("\n")
 }
