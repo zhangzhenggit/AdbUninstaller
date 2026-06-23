@@ -35,6 +35,8 @@ class AdbUninstallerAction : AnAction(
                 val deviceNames: Map<String, String> = serials.associateWith { serial ->
                     AdbService.getDeviceName(serial, adb)
                 }
+                indicator.text = "Scanning Android application modules…"
+                val projectApps = AppModuleScanner.scan(project)
 
                 ApplicationManager.getApplication().invokeLater {
                     if (serials.isEmpty()) {
@@ -45,7 +47,7 @@ class AdbUninstallerAction : AnAction(
                         )
                         return@invokeLater
                     }
-                    UninstallDialog(project, emptyList(), deviceNames, basePath).show()
+                    UninstallDialog(project, projectApps, deviceNames, basePath).show()
                 }
             }
         })

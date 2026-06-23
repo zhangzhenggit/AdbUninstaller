@@ -158,9 +158,37 @@ object AdbService {
     }
 
     fun getBootId(serial: String, adb: String): String? =
-        shell(serial, "cat /proc/sys/kernel/random/boot_id", adb)
+        shellResult(serial, "cat /proc/sys/kernel/random/boot_id", adb, timeoutSec = 5).output
             .trim()
             .takeIf { it.matches(Regex("[0-9a-fA-F-]{16,}")) }
+
+    fun isAdbRoot(serial: String, adb: String): Boolean {
+        val uid = shellResult(serial, "id -u", adb, timeoutSec = 10)
+        return uid.completed && uid.output.trim() == "0"
+    }
+
+    fun isSystemTargetWritable(serial: String, targetPath: String, adb: String): CommandResult {
+        if (!isSystemPartitionPath(targetPath)) {
+            return CommandResult(false, "Target is not under a writable system partition: $targetPath")
+        }
+        val root = systemPartitionRootFromPath(targetPath)
+            ?: return CommandResult(false, "Unable to resolve system partition for target: $targetPath")
+        val tempPath = "$root/.apppurge_write_check_${System.currentTimeMillis()}_${System.nanoTime()}"
+        val quotedTemp = shellQuote(tempPath)
+        val result = shellResult(
+            serial,
+            "tmp=$quotedTemp; echo apppurge > \"\$tmp\" && rm -f \"\$tmp\"",
+            adb,
+            timeoutSec = 10,
+        )
+        val output = result.output.trim()
+        return CommandResult(
+            result.completed,
+            output.ifBlank {
+                if (result.timedOut) "Writable check timed out for $root." else "Writable check failed for $root."
+            },
+        )
+    }
 
     fun prepareRootRemount(serial: String, adb: String): RemountResult {
         val root = execResult(listOf(adb, "-s", serial, "root"), timeoutSec = 20)
@@ -442,6 +470,10 @@ object AdbService {
 
     private fun isSystemPartitionPath(path: String): Boolean =
         listOf("/system/", "/system_ext/", "/product/", "/vendor/", "/odm/").any { path.startsWith(it) }
+
+    private fun systemPartitionRootFromPath(path: String): String? =
+        listOf("/system_ext", "/system", "/product", "/vendor", "/odm")
+            .firstOrNull { path == it || path.startsWith("$it/") }
 
     private fun getHiddenSystemPackagePath(serial: String, packageName: String, adb: String): String? {
         if (!isSafePackageName(packageName)) return null
